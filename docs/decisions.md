@@ -422,3 +422,26 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Decision:** A shared clock per interval exposed through `useSyncExternalStore`, whose server snapshot is `null`. The first paint and the hydration pass render an absolute UTC time; the ticking value takes over afterwards.
 **Alternatives:** `setState` inside a mount effect (rejected — the React lint rule forbids it, and correctly: it is a cascading render for something that is not React-owned state). Rendering relative times on the server (rejected — wrong the moment they arrive).
 **Consequence:** One timer per interval for the whole page rather than one per card.
+
+## 2026-08-14 — The dashboard is an app shell, so the height chain is load-bearing
+
+**Context:** Scrolling the findings list carried the detail panel off screen, which breaks "which data supports the recommendation" in practice — an operator reading the evidence table lost it by scrolling the list beside it.
+**Decision:** `<body>` is `h-dvh overflow-hidden` and every ancestor of a scroll container carries a definite height plus `min-h-0`; the panes own their scrollbars and the page itself never scrolls. The detail panel's header sits outside its scrolling region so the issue title, priority and status stay visible while evidence scrolls under them.
+**Alternatives:** `position: sticky` on the detail panel (rejected — it still scrolls with the document, it only delays the problem, and a sticky element inside a growing document has no bottom bound). `min-h-dvh` on the body (rejected — that is what was already there and is the bug: it lets the body grow, and one auto-height ancestor silently disables every `overflow-y-auto` beneath it).
+**Consequence:** `min-h-0` on a flex child is not decoration here — without it a pane refuses to shrink below its content and the overflow never engages. `dvh` rather than `vh` so a mobile URL bar doesn't crop the last card.
+
+## 2026-08-14 — Semantic colour tokens, light as the base and dark as the override
+
+**Context:** The palette was hardcoded to a single dark theme across 99 colour utilities in 8 component files, so following the operating system's colour scheme was a change to every component.
+**Decision:** ~22 CSS custom properties named by role (`--canvas`, `--ink-subtle`, `--warn-fg`) mapped through Tailwind's `@theme inline`, with light on `:root` and dark inside `@media (prefers-color-scheme: dark)`. No toggle, no persistence, no settings surface.
+**Alternatives:** Tailwind's `dark:` variant, which already keys on `prefers-color-scheme` and needs no config (rejected — it doubles every colour class at the call site, and the four status states plus four priority levels would each need a paired variant in six places; the tokens keep the palette in one file). A theme toggle (rejected — it needs persistence and a hydration-safe read, and the brief asks for neither).
+**Consequence:** Light is the base because the media query matches nothing when a browser expresses no preference, and light-on-white is the safer thing to land on. Grouping tokens by meaning rather than hue (`--warn-*` covers the analyzing pill, the retry chip and the stale chip) is what stops one amber drifting from another.
+
+## 2026-08-14 — Contrast is measured, and measuring it changed the palette
+
+**Context:** "Both themes stay legible" is the kind of claim that is easy to assert and easy to be wrong about, especially in the theme the author never looks at.
+**Decision:** A throwaway script parses the shipped `globals.css` and computes WCAG ratios for every foreground token against the surfaces it actually renders on, in both palettes — 4.5:1 for text, 3:1 for the priority rail and the large uppercase priority words.
+**Alternatives:** Picking from Tailwind's scale and trusting it (rejected — that is exactly what produced the failures below).
+**Consequence:** Four real failures, not zero. `--ink-subtle` — the most used token in the app, carrying every timestamp and label — sat at 4.4:1 on light surface and 3.7:1 on dark, and the medium priority rail at 2.9:1 on light. Both neutral scales moved a step and the medium rail went yellow rather than a darker orange so it stays separable from `high` beside it in the list. The four status states remain distinguishable by glyph, label and hue together, so a palette swap can change how legible they are but cannot collapse the distinction between them.
+
+**Open, not resolved:** the light palette has been measured but never seen — no visual verification of the rendered result — and some copy still reads poorly. Both are carried into slice 10's checklist.

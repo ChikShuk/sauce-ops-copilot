@@ -64,124 +64,142 @@ export function DetailPanel({
   const drivers = (detail ?? card).drivers;
 
   return (
-    <aside className="flex h-full flex-col overflow-hidden border-l border-zinc-800 bg-zinc-950">
-      <header className="flex items-start gap-3 border-b border-zinc-800 p-4">
-        <span
-          aria-hidden
-          className={`mt-1 h-10 w-1 shrink-0 rounded-full ${priorityRail(card.priority)}`}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <PriorityBadge priority={card.priority} />
-            <span className="text-xs text-zinc-400">
-              {card.restaurantId}
-              {card.orderId && ` · order ${card.orderId}`}
-            </span>
-            <StatusPill presentation={presentation} />
+    <aside className="flex h-full min-h-0 flex-col overflow-hidden border-l border-line">
+      {/*
+        The header is outside the scrolling region, so the issue title, priority
+        and status stay on screen while the evidence table scrolls under them —
+        an operator reading evidence never loses what it is evidence *of*.
+
+        Both this header and the body below share one `max-w-4xl` wrapper. Capping
+        only the body would leave the pinned title sitting left of the text
+        beneath it, which reads as a layout bug rather than as a deliberate
+        measure.
+      */}
+      <header className="shrink-0 border-b border-line">
+        <div className="mx-auto flex w-full max-w-4xl items-start gap-3 p-4">
+          <span
+            aria-hidden
+            className={`mt-1 h-10 w-1 shrink-0 rounded-full ${priorityRail(card.priority)}`}
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <PriorityBadge priority={card.priority} />
+              <span className="text-xs text-ink-muted">
+                {card.restaurantId}
+                {card.orderId && ` · order ${card.orderId}`}
+              </span>
+              <StatusPill presentation={presentation} />
+            </div>
+            <h2 className="mt-1.5 text-lg font-medium text-ink">
+              {card.issue ?? (
+                <span className="text-ink-subtle">{presentation.placeholder}</span>
+              )}
+            </h2>
+            <p className="mt-1 text-xs text-ink-subtle">
+              {card.eventCount} {card.eventCount === 1 ? "event" : "events"} ·{" "}
+              {formatUtcDateTime(card.firstEventAt)} → {formatUtcDateTime(card.lastEventAt)} ·
+              v{card.version}
+            </p>
           </div>
-          <h2 className="mt-1.5 text-lg font-medium text-zinc-50">
-            {card.issue ?? <span className="text-zinc-500">{presentation.placeholder}</span>}
-          </h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            {card.eventCount} {card.eventCount === 1 ? "event" : "events"} ·{" "}
-            {formatUtcDateTime(card.firstEventAt)} → {formatUtcDateTime(card.lastEventAt)} · v
-            {card.version}
-          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close detail panel"
+            className="shrink-0 rounded px-2 py-1 text-ink-subtle hover:bg-surface-hover hover:text-ink"
+          >
+            ✕
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close detail panel"
-          className="shrink-0 rounded px-2 py-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
-        >
-          ✕
-        </button>
       </header>
 
-      <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4">
-        <Section title="Why this priority">
-          {drivers.length === 0 ? (
-            <p className="text-sm text-zinc-500">
-              No severity threshold was crossed. Every finding is at least low priority.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {drivers.map((driver, index) => (
-                <li
-                  key={`${driver.signal}-${index}`}
-                  className="flex items-baseline gap-2 text-sm"
-                >
-                  <span className="font-mono text-xs text-zinc-500">{driver.signal}</span>
-                  <span className="text-zinc-200">{driver.detail}</span>
-                  <span className="ml-auto text-xs text-zinc-500">sets {driver.level}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Section>
-
-        <Section title="Summary">
-          <div className="flex flex-wrap gap-1.5">
-            {presentation.retry && <RetryChip retry={presentation.retry} />}
-            {presentation.staleProse && <StaleChip />}
-            {presentation.degraded && <DegradedChip />}
-          </div>
-
-          {detail?.summary ? (
-            <>
-              {presentation.placeholder && (
-                <p className="mt-2 text-sm text-red-300">{presentation.placeholder}</p>
-              )}
-              <p className="mt-2 text-sm leading-relaxed text-zinc-200">{detail.summary}</p>
-              <p className="mt-2 text-xs text-zinc-500">
-                {detail.summarySource === "llm"
-                  ? `Written by ${detail.llmModel ?? "the model"}`
-                  : "Written without the model"}
-                {detail.enrichedAt && (
-                  <>
-                    {" · "}
-                    <TimeAgo iso={detail.enrichedAt} />
-                  </>
-                )}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 p-4">
+          <Section title="Why this priority">
+            {drivers.length === 0 ? (
+              <p className="text-sm text-ink-subtle">
+                No severity threshold was crossed. Every finding is at least low priority.
               </p>
-            </>
-          ) : (
-            <p className="mt-2 text-sm text-zinc-500">
-              {error ? "Could not load this finding." : presentation.placeholder}
-            </p>
-          )}
-        </Section>
-
-        {detail && detail.recommendedActions.length > 0 && (
-          <Section title="Recommended actions">
-            <ul className="flex flex-col gap-2">
-              {detail.recommendedActions.map((action, index) => (
-                <li key={`${action.type}-${index}`} className="text-sm">
-                  <span className="font-medium text-zinc-100">{labelAction(action.type)}</span>
-                  <p className="text-zinc-400">{action.rationale}</p>
-                </li>
-              ))}
-            </ul>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {drivers.map((driver, index) => (
+                  <li
+                    key={`${driver.signal}-${index}`}
+                    className="flex items-baseline gap-2 text-sm"
+                  >
+                    <span className="font-mono text-xs text-ink-subtle">{driver.signal}</span>
+                    <span className="text-ink">{driver.detail}</span>
+                    <span className="ml-auto text-xs text-ink-subtle">
+                      sets {driver.level}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Section>
-        )}
 
-        <Section
-          title={`Evidence (${detail?.evidence.length ?? card.eventCount})`}
-          note={
-            detail && detail.citedEventIds === null && detail.summarySource !== null
-              ? "No citations recorded — this summary was not written by the model."
-              : undefined
-          }
-        >
-          {detail ? (
-            <EvidenceTable
-              evidence={detail.evidence}
-              hasCitations={detail.citedEventIds !== null}
-            />
-          ) : (
-            <p className="text-sm text-zinc-500">Loading evidence…</p>
+          <Section title="Summary">
+            <div className="flex flex-wrap gap-1.5">
+              {presentation.retry && <RetryChip retry={presentation.retry} />}
+              {presentation.staleProse && <StaleChip />}
+              {presentation.degraded && <DegradedChip />}
+            </div>
+
+            {detail?.summary ? (
+              <>
+                {presentation.placeholder && (
+                  <p className="mt-2 text-sm text-danger-fg">{presentation.placeholder}</p>
+                )}
+                <p className="mt-2 text-sm leading-relaxed text-ink">{detail.summary}</p>
+                <p className="mt-2 text-xs text-ink-subtle">
+                  {detail.summarySource === "llm"
+                    ? `Written by ${detail.llmModel ?? "the model"}`
+                    : "Written without the model"}
+                  {detail.enrichedAt && (
+                    <>
+                      {" · "}
+                      <TimeAgo iso={detail.enrichedAt} />
+                    </>
+                  )}
+                </p>
+              </>
+            ) : (
+              <p className="mt-2 text-sm text-ink-subtle">
+                {error ? "Could not load this finding." : presentation.placeholder}
+              </p>
+            )}
+          </Section>
+
+          {detail && detail.recommendedActions.length > 0 && (
+            <Section title="Recommended actions">
+              <ul className="flex flex-col gap-2">
+                {detail.recommendedActions.map((action, index) => (
+                  <li key={`${action.type}-${index}`} className="text-sm">
+                    <span className="font-medium text-ink">{labelAction(action.type)}</span>
+                    <p className="text-ink-muted">{action.rationale}</p>
+                  </li>
+                ))}
+              </ul>
+            </Section>
           )}
-        </Section>
+
+          <Section
+            title={`Evidence (${detail?.evidence.length ?? card.eventCount})`}
+            note={
+              detail && detail.citedEventIds === null && detail.summarySource !== null
+                ? "No citations recorded — this summary was not written by the model."
+                : undefined
+            }
+          >
+            {detail ? (
+              <EvidenceTable
+                evidence={detail.evidence}
+                hasCitations={detail.citedEventIds !== null}
+              />
+            ) : (
+              <p className="text-sm text-ink-subtle">Loading evidence…</p>
+            )}
+          </Section>
+        </div>
       </div>
     </aside>
   );
@@ -198,10 +216,10 @@ function Section({
 }) {
   return (
     <section>
-      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-subtle">
         {title}
       </h3>
-      {note && <p className="mb-2 text-xs text-zinc-500">{note}</p>}
+      {note && <p className="mb-2 text-xs text-ink-subtle">{note}</p>}
       {children}
     </section>
   );

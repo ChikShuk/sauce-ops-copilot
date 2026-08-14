@@ -1,24 +1,135 @@
 @import "tailwindcss";
 
-/* One committed theme rather than a light/dark pair. An operations board is
-   looked at for hours in a kitchen office, and supporting two palettes would
-   double the surface on which priority colours have to stay distinguishable
-   for no benefit the brief asks for. */
+/* The whole palette, in one place, as semantic roles rather than colour names.
+   Components reference `bg-surface` and `text-ink-subtle`, never `zinc-500` —
+   which is what makes a second theme a change to this file instead of a change
+   to every component.
+
+   Light is the base and dark is the override, because prefers-color-scheme has
+   no value when a browser has no preference, and light-on-white is the safer
+   thing to land on when nothing is known.
+
+   No toggle: this follows the operating system and holds no state. A theme
+   switch would need persistence, a settings surface, and a hydration-safe way
+   to read it back — none of which the brief asks for. */
 :root {
-  --background: #09090b;
-  --foreground: #fafafa;
+  --canvas: #ffffff;
+  --surface: #f4f4f5;
+  --surface-hover: #e9e9ec;
+  --line: #d4d4d8;
+  --ink: #18181b;
+  /* Both are a step darker than the obvious zinc-600/500 pick: at those values
+     ink-subtle lands at 4.4:1 against --surface, just under AA. It is the most
+     used token in the app — every timestamp, label and secondary line — so it
+     is the wrong one to leave marginal. Ratios are measured, not eyeballed. */
+  --ink-muted: #3f3f46;
+  --ink-subtle: #52525b;
+
+  /* Priority. The rail is a block of colour and the badge is small text, so
+     they carry different weights of the same hue — the rail can be vivid, the
+     word has to stay readable. */
+  --priority-critical: #dc2626;
+  --priority-critical-fg: #b91c1c;
+  --priority-high: #ea580c;
+  --priority-high-fg: #c2410c;
+  /* Rail darkened from amber-600, which sat at 2.9:1 against --surface. Yellow
+     rather than a darker orange so it stays separable from --priority-high next
+     to it in the list. */
+  --priority-medium: #a16207;
+  --priority-medium-fg: #b45309;
+  --priority-low: #0284c7;
+  --priority-low-fg: #0369a1;
+
+  /* Grouped by meaning, not by hue: the analyzing pill, the retry chip and the
+     stale-prose chip are one warning vocabulary and must not drift apart. */
+  --ok-fg: #047857;
+  --ok-border: #6ee7b7;
+  --ok-bg: #ecfdf5;
+
+  --warn-fg: #b45309;
+  --warn-border: #fcd34d;
+  --warn-bg: #fffbeb;
+
+  --danger-fg: #b91c1c;
+  --danger-border: #fca5a5;
+
+  /* Tint for the row that just changed. Solid rather than an alpha over the
+     canvas so it lands the same on a card and on a selected card. */
+  --highlight: #dbeafe;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #09090b;
+    --surface: #18181b;
+    --surface-hover: #27272a;
+    --line: #27272a;
+    --ink: #fafafa;
+    /* Both a step lighter than zinc-400/500 for the same reason as the light
+       palette: zinc-500 on this canvas is 4.1:1, under AA. */
+    --ink-muted: #b4b4bd;
+    --ink-subtle: #94949f;
+
+    --priority-critical: #ef4444;
+    --priority-critical-fg: #f87171;
+    --priority-high: #f97316;
+    --priority-high-fg: #fb923c;
+    --priority-medium: #fbbf24;
+    --priority-medium-fg: #fcd34d;
+    --priority-low: #0ea5e9;
+    --priority-low-fg: #38bdf8;
+
+    --ok-fg: #6ee7b7;
+    --ok-border: #047857;
+    --ok-bg: #052e23;
+
+    --warn-fg: #fcd34d;
+    --warn-border: #b45309;
+    --warn-bg: #2a1f07;
+
+    --danger-fg: #fca5a5;
+    --danger-border: #b91c1c;
+
+    --highlight: #1e3a5f;
+  }
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+
+  --color-priority-critical: var(--priority-critical);
+  --color-priority-critical-fg: var(--priority-critical-fg);
+  --color-priority-high: var(--priority-high);
+  --color-priority-high-fg: var(--priority-high-fg);
+  --color-priority-medium: var(--priority-medium);
+  --color-priority-medium-fg: var(--priority-medium-fg);
+  --color-priority-low: var(--priority-low);
+  --color-priority-low-fg: var(--priority-low-fg);
+
+  --color-ok-fg: var(--ok-fg);
+  --color-ok-border: var(--ok-border);
+  --color-ok-bg: var(--ok-bg);
+
+  --color-warn-fg: var(--warn-fg);
+  --color-warn-border: var(--warn-border);
+  --color-warn-bg: var(--warn-bg);
+
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-border: var(--danger-border);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--canvas);
+  color: var(--ink);
 }
 
 /* Draws the eye to the row that moved without moving it. Deliberately slow to
@@ -26,7 +137,7 @@ body {
    find where a card went. */
 @keyframes card-changed {
   from {
-    background-color: rgb(59 130 246 / 0.16);
+    background-color: var(--highlight);
   }
   to {
     background-color: transparent;

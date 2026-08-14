@@ -147,6 +147,9 @@ if time runs out there is always a demoable product.
 10. **Docker Compose** — one-command run. Also verify SIGTERM delivery and graceful
     worker shutdown *inside the Linux container* — Windows never generates SIGTERM,
     so that path is unverified as of slice 3 and can only be exercised here.
+    Also: final visual pass on both palettes, verify text legibility. The light
+    palette shipped contrast-measured but never seen, and some copy still reads
+    poorly — both are open as of the slice-6 layout pass.
 11. **README + architecture doc**
 
 ---

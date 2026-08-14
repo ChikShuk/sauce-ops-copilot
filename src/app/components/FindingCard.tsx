@@ -41,8 +41,8 @@ export function FindingCard({
       type="button"
       onClick={onSelect}
       aria-current={selected}
-      className={`flex w-full gap-3 border-b border-zinc-800 p-3 text-left transition-colors hover:bg-zinc-900 ${
-        selected ? "bg-zinc-900" : ""
+      className={`flex w-full gap-3 border-b border-line p-3 text-left transition-colors hover:bg-surface ${
+        selected ? "bg-surface" : ""
       } ${highlighted ? "card-changed" : ""}`}
     >
       <span
@@ -54,7 +54,7 @@ export function FindingCard({
         <span className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-baseline gap-2">
             <PriorityBadge priority={finding.priority} />
-            <span className="truncate text-xs text-zinc-400">
+            <span className="truncate text-xs text-ink-muted">
               {finding.restaurantId}
               {finding.orderId && ` · order ${finding.orderId}`}
             </span>
@@ -66,9 +66,9 @@ export function FindingCard({
             That tension is deliberate: naming the pattern is where the model
             earns its place, and a board headed by raw metrics reads as a log.
             The drivers line below carries equal weight as the counterbalance. */}
-        <span className="mt-1.5 block truncate text-[15px] font-medium text-zinc-50">
+        <span className="mt-1.5 block truncate text-[15px] font-medium text-ink">
           {finding.issue ?? (
-            <span className="font-normal text-zinc-500">{presentation.placeholder}</span>
+            <span className="font-normal text-ink-subtle">{presentation.placeholder}</span>
           )}
         </span>
 
@@ -85,13 +85,13 @@ export function FindingCard({
           {finding.extractedTags.map((tag) => (
             <span
               key={tag}
-              className="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[11px] text-zinc-400"
+              className="rounded bg-surface-hover px-1.5 py-0.5 text-[11px] text-ink-muted"
             >
               {labelTag(tag)}
             </span>
           ))}
 
-          <span className="ml-auto shrink-0 text-[11px] text-zinc-500">
+          <span className="ml-auto shrink-0 text-[11px] text-ink-subtle">
             {finding.eventCount} {finding.eventCount === 1 ? "event" : "events"} ·{" "}
             <TimeAgo iso={finding.lastEventAt} />
           </span>

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BoardMessage } from "@/lib/realtime/broadcaster";
 import type { FindingCard as FindingCardData, QueueCounts } from "@/lib/findings/types";
 import { DetailPanel } from "./DetailPanel";
+import { EmptyBoard, NoSelection } from "./EmptyStates";
 import { FindingCard } from "./FindingCard";
 import { QueueHealth, type ConnectionState } from "./QueueHealth";
 
@@ -75,18 +76,21 @@ export function FindingsBoard({
   const selected = findings.find((finding) => finding.id === selectedId) ?? null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <QueueHealth queue={queue} connection={connection} />
 
-      <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 overflow-y-auto md:max-w-md md:flex-none md:basis-[26rem]">
-          {findings.length === 0 ? (
-            <p className="p-6 text-sm text-zinc-500">
-              No findings yet. Events posted to the ingestion API appear here as they
-              correlate.
-            </p>
-          ) : (
-            findings.map((finding) => (
+      {findings.length === 0 ? (
+        // Takes over both panes rather than sitting in the 416px list column.
+        // A curl command wrapped into that width is unreadable, and the screen
+        // a reviewer meets first shouldn't be mostly empty gutter.
+        <EmptyBoard />
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          {/* Each pane owns its own scrollbar. min-h-0 is what lets a flex
+              child shrink below its content — without it the pane grows to fit
+              every card and the overflow never engages. */}
+          <div className="min-h-0 w-full shrink-0 overflow-y-auto md:w-[26rem]">
+            {findings.map((finding) => (
               <FindingCard
                 key={finding.id}
                 finding={finding}
@@ -96,26 +100,26 @@ export function FindingsBoard({
                   setSelectedId((current) => (current === finding.id ? null : finding.id))
                 }
               />
-            ))
-          )}
-        </div>
+            ))}
+          </div>
 
-        {selected ? (
-          <div className="hidden min-w-0 flex-1 md:block">
-            <DetailPanel card={selected} onClose={() => setSelectedId(null)} />
+          <div className="hidden min-h-0 min-w-0 flex-1 md:block">
+            {selected ? (
+              <DetailPanel card={selected} onClose={() => setSelectedId(null)} />
+            ) : (
+              <NoSelection />
+            )}
           </div>
-        ) : (
-          <div className="hidden flex-1 items-center justify-center border-l border-zinc-800 md:flex">
-            <p className="text-sm text-zinc-600">Select a finding to see its evidence.</p>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Below the two-pane breakpoint the panel becomes a full-screen overlay
           rather than a squeezed column — evidence rows are unreadable at half a
-          phone's width. */}
+          phone's width. bg-canvas so it occludes the list rather than letting it
+          show through, and h-dvh so it owns the viewport and scrolls internally
+          exactly as the desktop pane does. */}
       {selected && (
-        <div className="fixed inset-0 z-10 md:hidden">
+        <div className="fixed inset-0 z-20 h-dvh bg-canvas md:hidden">
           <DetailPanel card={selected} onClose={() => setSelectedId(null)} />
         </div>
       )}

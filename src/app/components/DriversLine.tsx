@@ -14,19 +14,19 @@ export function DriversLine({ drivers }: { drivers: PriorityDriver[] }) {
     // Never a blank row. scorePriority returns no drivers at base priority, and
     // an empty line here would read as a rendering failure on the one element
     // whose whole job is to be believed.
-    return <p className="text-sm text-zinc-500">{line.emptyLabel}</p>;
+    return <p className="text-sm text-ink-subtle">{line.emptyLabel}</p>;
   }
 
   return (
-    <p className="text-sm text-zinc-200">
+    <p className="text-sm text-ink">
       {line.shown.map((driver, index) => (
         <span key={`${driver.signal}-${index}`}>
-          {index > 0 && <span className="text-zinc-600"> · </span>}
+          {index > 0 && <span className="text-ink-subtle"> · </span>}
           {driver.detail}
         </span>
       ))}
       {line.moreCount > 0 && (
-        <span className="text-zinc-500"> · +{line.moreCount} more</span>
+        <span className="text-ink-subtle"> · +{line.moreCount} more</span>
       )}
     </p>
   );

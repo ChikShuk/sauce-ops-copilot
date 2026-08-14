@@ -24,7 +24,17 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/*
+        The dashboard is an app shell, not a document: the page itself never
+        scrolls, its panes do. That requires a definite height the whole way
+        down — `min-h-dvh` here would let the body grow past the viewport, and
+        every `overflow-y-auto` further down would silently stop working
+        because its ancestors have no height to overflow.
+
+        dvh rather than vh so a mobile browser's collapsing URL bar doesn't
+        crop the last card.
+      */}
+      <body className="h-dvh overflow-hidden">{children}</body>
     </html>
   );
 }

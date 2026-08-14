@@ -8,13 +8,15 @@ import { useNow } from "./useNow";
 
 // Every state differs by hue, glyph AND wording together. Colour alone would
 // make the four states indistinguishable to a colourblind operator, and this
-// board's entire job is telling them apart at a glance.
+// board's entire job is telling them apart at a glance. That is also what makes
+// the palette safe to swap: a theme can change how legible these are, but it
+// cannot collapse the distinction between them.
 const STATUS_STYLES: Record<CardState, { className: string; glyph: string }> = {
-  queued: { className: "border-zinc-700 text-zinc-400", glyph: "○" },
-  analyzing: { className: "border-amber-500/60 text-amber-300", glyph: "◐" },
-  ready: { className: "border-emerald-500/60 text-emerald-300", glyph: "●" },
-  failed_unanalyzed: { className: "border-red-500/60 text-red-300", glyph: "✕" },
-  failed_stale: { className: "border-red-500/60 text-red-300", glyph: "✕" },
+  queued: { className: "border-line text-ink-muted", glyph: "○" },
+  analyzing: { className: "border-warn-border text-warn-fg", glyph: "◐" },
+  ready: { className: "border-ok-border text-ok-fg", glyph: "●" },
+  failed_unanalyzed: { className: "border-danger-border text-danger-fg", glyph: "✕" },
+  failed_stale: { className: "border-danger-border text-danger-fg", glyph: "✕" },
 };
 
 export function StatusPill({ presentation }: { presentation: CardPresentation }) {
@@ -35,20 +37,25 @@ export function StatusPill({ presentation }: { presentation: CardPresentation })
   );
 }
 
+// The rail is a solid block and the badge is small text, so each priority
+// carries two weights of its hue: the rail can be vivid, the word has to stay
+// readable against the card behind it.
 const PRIORITY_STYLES: Record<Priority, { rail: string; text: string }> = {
-  critical: { rail: "bg-red-500", text: "text-red-400" },
-  high: { rail: "bg-orange-500", text: "text-orange-400" },
-  medium: { rail: "bg-amber-400", text: "text-amber-300" },
-  low: { rail: "bg-sky-500", text: "text-sky-400" },
+  critical: { rail: "bg-priority-critical", text: "text-priority-critical-fg" },
+  high: { rail: "bg-priority-high", text: "text-priority-high-fg" },
+  medium: { rail: "bg-priority-medium", text: "text-priority-medium-fg" },
+  low: { rail: "bg-priority-low", text: "text-priority-low-fg" },
 };
 
 export function priorityRail(priority: Priority | null): string {
-  return priority ? PRIORITY_STYLES[priority].rail : "bg-zinc-700";
+  return priority ? PRIORITY_STYLES[priority].rail : "bg-line";
 }
 
 export function PriorityBadge({ priority }: { priority: Priority | null }) {
   if (!priority) {
-    return <span className="text-xs font-semibold tracking-wider text-zinc-500">UNSCORED</span>;
+    return (
+      <span className="text-xs font-semibold tracking-wider text-ink-subtle">UNSCORED</span>
+    );
   }
 
   return (
@@ -70,9 +77,9 @@ export function RetryChip({ retry }: { retry: RetryState }) {
   const now = useNow(1_000);
 
   return (
-    <span className="inline-flex items-center gap-1 rounded border border-amber-600/50 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300">
+    <span className="inline-flex items-center gap-1 rounded border border-warn-border bg-warn-bg px-1.5 py-0.5 text-[11px] text-warn-fg">
       Retry {retry.attempts}/{retry.maxAttempts}
-      {now !== null && <span className="text-amber-400/70">· next in {formatCountdown(retry.nextAttemptAt, now)}</span>}
+      {now !== null && <span>· next in {formatCountdown(retry.nextAttemptAt, now)}</span>}
     </span>
   );
 }
@@ -80,7 +87,7 @@ export function RetryChip({ retry }: { retry: RetryState }) {
 export function StaleChip() {
   return (
     <span
-      className="inline-flex items-center rounded border border-amber-600/50 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300"
+      className="inline-flex items-center rounded border border-warn-border bg-warn-bg px-1.5 py-0.5 text-[11px] text-warn-fg"
       title="New evidence arrived after this summary was written. It will be rewritten on the next attempt."
     >
       Summary predates newest evidence
@@ -91,7 +98,7 @@ export function StaleChip() {
 export function DegradedChip() {
   return (
     <span
-      className="inline-flex items-center rounded border border-zinc-600 bg-zinc-800/60 px-1.5 py-0.5 text-[11px] text-zinc-400"
+      className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 text-[11px] text-ink-muted"
       title="Written without the language model. Evidence and priority are unaffected."
     >
       No model — template summary

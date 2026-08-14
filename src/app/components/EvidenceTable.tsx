@@ -34,7 +34,7 @@ export function EvidenceTable({
   hasCitations: boolean;
 }) {
   if (evidence.length === 0) {
-    return <p className="text-sm text-zinc-500">No evidence attached.</p>;
+    return <p className="text-sm text-ink-subtle">No evidence attached.</p>;
   }
 
   return (
@@ -43,16 +43,16 @@ export function EvidenceTable({
         <li
           key={item.id}
           className={`rounded border p-2.5 text-sm ${
-            item.cited ? "border-emerald-800/70 bg-emerald-500/5" : "border-zinc-800"
+            item.cited ? "border-ok-border bg-ok-bg" : "border-line"
           }`}
         >
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span className="font-mono text-xs text-zinc-500">{item.label}</span>
-            <span className="font-medium text-zinc-100">{labelEventType(item.eventType)}</span>
+            <span className="font-mono text-xs text-ink-subtle">{item.label}</span>
+            <span className="font-medium text-ink">{labelEventType(item.eventType)}</span>
 
             {item.issueClass !== item.eventType && (
               <span
-                className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400"
+                className="rounded bg-surface-hover px-1.5 py-0.5 text-[11px] text-ink-muted"
                 title="Deterministic root-cause class, derived from structured fields only"
               >
                 {labelIssueClass(item.issueClass)}
@@ -60,19 +60,19 @@ export function EvidenceTable({
             )}
 
             {facts(item).map((fact) => (
-              <span key={fact} className="text-zinc-300">
+              <span key={fact} className="text-ink-muted">
                 {fact}
               </span>
             ))}
 
             {item.cited && hasCitations && (
-              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] text-emerald-300">
+              <span className="rounded border border-ok-border px-1.5 py-0.5 text-[11px] text-ok-fg">
                 cited
               </span>
             )}
 
             <span
-              className="ml-auto text-xs text-zinc-500"
+              className="ml-auto text-xs text-ink-subtle"
               title={formatUtcDateTime(item.occurredAt)}
             >
               <TimeAgo iso={item.occurredAt} />
@@ -82,12 +82,12 @@ export function EvidenceTable({
           {/* Customer-authored text. Rendered as text, never as markup — the
               same input the prompt builder fences as data. */}
           {item.customerText && (
-            <p className="mt-1.5 border-l-2 border-zinc-700 pl-2 text-zinc-400">
+            <p className="mt-1.5 border-l-2 border-line pl-2 text-ink-muted">
               {item.customerText}
             </p>
           )}
 
-          <p className="mt-1.5 font-mono text-[11px] text-zinc-600">{item.clientEventId}</p>
+          <p className="mt-1.5 font-mono text-[11px] text-ink-subtle">{item.clientEventId}</p>
         </li>
       ))}
     </ul>
