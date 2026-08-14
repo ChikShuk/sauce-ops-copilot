@@ -84,6 +84,9 @@ constraint, the choice, the alternative rejected, the cost._
 ### Prompt injection defense
 <!-- slice: 5 --> _TODO_
 
+### Model selection
+<!-- slice: 5 --> _TODO_
+
 ---
 
 ## Architectural conditions

@@ -54,11 +54,20 @@ Postgres does queue duty via `SELECT ... FOR UPDATE SKIP LOCKED`. The assignment
 explicitly warns against adding Redis to satisfy a checkbox. One fewer moving part in
 Docker Compose, and no permanent business data living outside the durable store.
 
-### 3. Transactional outbox.
+### 3. The job row is written in the same transaction as the event.
 
-Event row and outbox row are written in a single transaction. A relay/worker polls
-unpublished outbox rows. This is what makes "saved but crashed before queuing"
-impossible to lose.
+One table, `event_jobs`, carrying status, attempts, next_attempt_at, claimed_at.
+Written atomically with the event row. The worker claims from it directly using
+`SELECT ... FOR UPDATE SKIP LOCKED`.
+
+No separate outbox table and no relay. The outbox pattern exists to bridge a database
+and a *separate* broker, where the write and the publish cannot share a transaction.
+Here the queue is Postgres itself, so relaying rows between two tables in the same
+database would add a moving part and a failure mode without adding any guarantee.
+
+Consequence: "event saved but crashed before queuing" is impossible by construction,
+not merely recoverable. If we later moved to a real broker, `event_jobs` becomes the
+outbox and a relay is added at that seam — document this in the README.
 
 ### 4. Idempotency at two layers.
 
@@ -121,9 +130,9 @@ boundary made physical.
 Build in this order. Each slice must work end-to-end before starting the next, so that
 if time runs out there is always a demoable product.
 
-1. **Data model + migrations** — events, findings, finding_events, outbox, jobs, operator_actions
+1. **Data model + migrations** — events, event_jobs, findings, finding_events, operator_actions
 2. **Ingestion** — POST endpoint, validation, dedup, outbox write, returns immediately
-3. **Worker loop** — claim job with SKIP LOCKED, status transitions, retry, DLQ
+3. **Worker loop** — claim from event_jobs with SKIP LOCKED, status transitions, retry, DLQ
 4. **Correlation** — grouping rules + priority rules, unit tested
 5. **LLM integration** — provider interface, fallback impl first, then Anthropic impl
 6. **SSE + dashboard** — live findings list, detail panel, evidence, status badges
