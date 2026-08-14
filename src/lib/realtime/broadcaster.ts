@@ -47,6 +47,10 @@ function fingerprint(finding: FindingCard): string {
     finding.enrichedVersion ?? "-",
     finding.hasSummary ? "s" : "-",
     finding.summarySource ?? "-",
+    // Operator actions change no other field, so without these an action would
+    // never reach a second browser watching the same board.
+    finding.reviewedAt ?? "-",
+    finding.resolvedAt ?? "-",
     finding.retry?.attempts ?? "-",
     finding.retry?.nextAttemptAt ?? "-",
   ].join("|");

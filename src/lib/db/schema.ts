@@ -263,6 +263,26 @@ export const operatorActions = pgTable(
     actionType: text("action_type").notNull(),
     note: text("note"),
     actor: text("actor").notNull().default("operator"),
+    // What the operator was looking at when they acted.
+    //
+    // Prose is COPIED here, evidence is REFERENCED by id — and that asymmetry is
+    // the whole point of the column. A finding's `summary` is overwritten by the
+    // next enrichment, so feedback storing only finding_id points at prose that
+    // no longer exists: the judgement survives and the thing judged is gone.
+    // `events` rows never change, so their ids are enough to rehydrate the
+    // model's exact input.
+    //
+    // ⚠ That second half is a convention, not a constraint. Nothing in the
+    // database prevents `UPDATE events`, and today nothing does it — the table
+    // is written once by enqueueEvent and read forever after. If a mutation path
+    // is ever added, every thumbs_down snapshot taken before it silently starts
+    // rehydrating to different input than the operator judged, which makes the
+    // eval set quietly wrong rather than loudly broken. Copy the payload in here
+    // instead, or don't add the mutation.
+    //
+    // Always carries version/priority/status; thumbs_down additionally carries
+    // the full artifact under judgement. See src/lib/actions/recordAction.ts.
+    context: jsonb("context"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

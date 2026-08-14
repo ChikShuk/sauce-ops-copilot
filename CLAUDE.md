@@ -167,6 +167,8 @@ if time runs out there is always a demoable product.
   except `llm/`, where the interface is required by the fallback design.
 - Never edit code after the verification pass without re-running verification.
   Lint and typecheck do not validate SQL inside template literals.
+- Never print .env contents. To confirm a key exists, use `grep -c '^KEY_NAME=' .env`
+  — never cat, tail, or head the file.
 
 ---
 

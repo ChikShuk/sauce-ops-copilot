@@ -1,0 +1,1 @@
+ALTER TABLE "operator_actions" ADD COLUMN "context" jsonb;

@@ -41,9 +41,14 @@ export function FindingCard({
       type="button"
       onClick={onSelect}
       aria-current={selected}
+      // Reviewed means triaged, not finished — it stays in the working list and
+      // keeps its position, just quieter. Resolved findings are moved out of
+      // this list entirely by FindingsBoard.
       className={`flex w-full gap-3 border-b border-line p-3 text-left transition-colors hover:bg-surface ${
         selected ? "bg-surface" : ""
-      } ${highlighted ? "card-changed" : ""}`}
+      } ${finding.reviewedAt !== null && finding.resolvedAt === null ? "opacity-60" : ""} ${
+        highlighted ? "card-changed" : ""
+      }`}
     >
       <span
         aria-hidden
@@ -77,6 +82,16 @@ export function FindingCard({
         </span>
 
         <span className="mt-2 flex flex-wrap items-center gap-1.5">
+          {finding.resolvedAt !== null && (
+            <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-subtle">
+              Resolved
+            </span>
+          )}
+          {finding.reviewedAt !== null && finding.resolvedAt === null && (
+            <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-subtle">
+              Reviewed
+            </span>
+          )}
           {presentation.retry && <RetryChip retry={presentation.retry} />}
           {presentation.staleProse && <StaleChip />}
           {presentation.degraded && <DegradedChip />}

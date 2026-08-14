@@ -480,3 +480,45 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Decision:** One click posts a fresh event and then the identical body again, logging `201` and then `200 duplicate` naming the id it collided with.
 **Alternatives:** Re-sending whatever was posted last (rejected — it depends on session state and does nothing as the first button pressed on an empty board).
 **Consequence:** Always shows the whole shape, never depends on history. The board gains exactly one event from two posts, which is the assertion; the log line is what makes the absence of a second one legible rather than looking like a button that failed.
+
+## 2026-08-14 — Three operator actions ship, not four
+
+**Context:** The CHECK constraint on `operator_actions` permits `mark_reviewed`, `mark_resolved`, `thumbs_up` and `thumbs_down`. Shipping all four because the enum has them is the path of least resistance.
+**Decision:** `mark_reviewed`, `mark_resolved`, `thumbs_down`. Two axes — workflow and quality — with each action having a consequence: reviewed de-emphasizes the card, resolved sets `resolved_at` *and* `closed_at` and moves it out of the working list, thumbs_down captures an eval example.
+**Alternatives:** Also shipping `thumbs_up` (rejected — it lands on neither axis. It changes no state, and as a quality signal it is close to unactionable: a negative tells you which summary to go and read, a positive tells you nothing you can act on without a baseline). Dropping `mark_reviewed` too (rejected — it survives the same test because it does have a consequence: an operator working a priority-sorted queue needs a third option between "leave it screaming at the top" and "close it before the kitchen has answered". Without that, `reviewed_at` would be a badge and should have been cut).
+**Consequence:** `thumbs_up` stays in the constraint — removing it is a migration for no benefit — and a unit test asserts the Zod schema rejects it, so the omission reads as deliberate rather than as an oversight waiting to be "fixed".
+
+## 2026-08-14 — The audit log appends always; finding state is first-write-wins
+
+**Context:** Double-clicking "mark reviewed" must either not produce two rows or produce two harmlessly.
+**Decision:** Harmlessly. Every call appends to `operator_actions`; `findings.reviewed_at` and `resolved_at` are set with `COALESCE(col, now())`. Both writes share one transaction.
+**Alternatives:** `UNIQUE (finding_id, action_type)` (rejected — `operator_actions` is an append-only audit log, and an operator re-reviewing a finding after new evidence arrives is a real event that a log should not silently drop). Overwriting the timestamp on each click (rejected — `reviewed_at` then means "most recently glanced at" rather than "when this was first triaged", which is the useful reading).
+**Consequence:** The split holds: the log is what happened, `findings` is what is true now. The UI disables a button in flight and once state is set, so duplicates are the safety net for a genuine double-submit rather than the expected case. `thumbs_down` is deliberately different — it appends every time and re-enables when `version` moves, because feedback is per version and a judgement of v3's summary says nothing about v5's.
+
+## 2026-08-14 — The board partitions on resolved_at, never on closed_at
+
+**Context:** Resolving sets `closed_at` as well as `resolved_at`, and resolved findings should leave the working list. The obvious filter is the one that is already there.
+**Decision:** Partition on `resolved_at IS NOT NULL`, client-side. Resolved findings move to a collapsed "Resolved (n)" section at the bottom of the list.
+**Alternatives:** Filtering on `closed_at IS NULL` (rejected, and this is the trap — a finding whose rolling window merely lapsed also has `closed_at` set and is history an operator should still see. That filter would silently hide every past finding on the board and break an invariant recorded two slices earlier: *"closed_at is a lifecycle marker, never a visibility filter"*). Dropping resolved findings entirely (rejected — the action stops feeling reversible and a reviewer who clicks Resolve loses the only evidence anything happened). Sorting them to the bottom in SQL (rejected — that would put ordering in two places; the SQL sort stays the single source of order and the client only partitions).
+**Consequence:** An integration test asserts a self-closed, operator-untouched finding stays visible and unresolved, so the trap can't be walked into later by someone reaching for the nearer column.
+
+## 2026-08-14 — thumbs_down copies the prose and references the evidence
+
+**Context:** A bare thumb is nearly useless later. The README names the missing eval harness as the most significant gap, and that claim is only credible if the feedback captured can actually seed one.
+**Decision:** `operator_actions.context` jsonb. Every action records `version`, `priority`, `status`; `thumbs_down` additionally records the issue, the summary, the recommended actions, `llm_model`, `summary_source`, `cited_event_ids`, and the evidence event ids.
+**Alternatives:** Storing only `finding_id` and joining later (rejected, and this is the crux — a finding's `summary` is *overwritten* by the next enrichment, so the judgement would survive and the thing judged would be gone). Copying the evidence payloads too (rejected — `events` is immutable and append-only, so ids rehydrate the model's exact input at no storage cost).
+**Consequence:** Each thumbs_down becomes a complete eval row: input, output, judgement, provenance. The asymmetry — prose copied, evidence referenced — is the whole design, and it rests on `events` staying append-only; the schema comment says so next to the column, because nothing in the database enforces it. Proven by a test that thumbs-downs at v2, re-enriches to v3, and asserts the captured summary is still v2's.
+
+## 2026-08-14 — Optimistic action state, settled by snapshot confirmation
+
+**Context:** The board polls once a second. Waiting for the stream to reflect a click reads as a dead button.
+**Decision:** Apply locally on success, and clear the overlay only when an incoming snapshot *confirms* the field is set.
+**Alternatives:** Waiting for the stream (rejected — up to a second of nothing after a click). Clearing the overlay on the next message unconditionally (rejected — a snapshot polled between the click and the commit would flick the card back to unresolved and then forward again).
+**Consequence:** Safe here for a reason specific to this build: every SSE message is a complete board, so there is no patch to merge and local state cannot drift permanently. A direct payoff of the slice-6 whole-board decision.
+
+## 2026-08-14 — The eval snapshot omits priority drivers on purpose
+
+**Context:** A thumbs_down snapshot has to be enough to re-run a prompt change against the example the operator rejected. That means reconstructing the whole prompt — evidence, priority, event count, window, and the priority *drivers* that `buildUserPrompt` renders under "WHY THIS PRIORITY". The snapshot stores none of the drivers, and `findings.priority_drivers` is recomputed on every correlation, so the values as of the flagged version are not sitting in a column anywhere.
+**Decision:** Leave them out and record why. Given `context.evidence_event_ids`, the evidence rows rehydrate exactly — `events` is immutable and append-only — and `scorePriority` is a pure function of that evidence plus a recurrence count that is itself a deterministic query anchored to the finding's own `last_event_at`. Drivers, `event_count`, `first_event_at` and `last_event_at` therefore all recompute from the ids rather than needing to be stored.
+**Alternatives:** Snapshotting `priority_drivers` alongside the prose (rejected — it stores something derivable, and a stored copy can silently disagree with what `scorePriority` would produce today, which is worse than not having it: the harness would be measuring against a stale rationale rather than the current rules). Storing nothing and joining `findings` later (already rejected for the prose — that is the whole reason `context` exists).
+**Consequence:** The rule the snapshot follows is the same boundary the rest of the design rests on: **model output is copied because it cannot be recomputed; deterministic output is referenced because it can.** Prose, actions and citations are copied; evidence, drivers and aggregates are not. Recorded here because the omission looks like a gap to anyone building the harness later, and reaching for a `priority_drivers` copy would quietly reintroduce the drift this avoids.

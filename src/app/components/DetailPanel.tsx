@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { deriveCardState } from "@/lib/findings/cardState";
-import type { FindingCard, FindingDetail } from "@/lib/findings/types";
+import type { FindingCard, FindingDetail, OperatorActionRecord } from "@/lib/findings/types";
+import { ActionBar, type ActionResult } from "./ActionBar";
 import {
   DegradedChip,
   PriorityBadge,
@@ -24,12 +25,17 @@ import { formatUtcDateTime, labelAction } from "./format";
 export function DetailPanel({
   card,
   onClose,
+  onActionRecorded,
 }: {
   card: FindingCard;
   onClose: () => void;
+  onActionRecorded: (result: ActionResult) => void;
 }) {
   const [detail, setDetail] = useState<FindingDetail | null>(null);
   const [error, setError] = useState(false);
+  // An operator action changes none of the fields the effect below watches, so
+  // it needs its own trigger to pull the refreshed action history.
+  const [reloadKey, setReloadKey] = useState(0);
 
   const findingId = card.id;
   const version = card.version;
@@ -58,7 +64,7 @@ export function DetailPanel({
     // `status` is a dependency alongside `version` because enrichment moves the
     // status without bumping the version — that is what makes version usable as
     // a fence in the first place.
-  }, [findingId, version, status]);
+  }, [findingId, version, status, reloadKey]);
 
   const presentation = deriveCardState(detail ?? card);
   const drivers = (detail ?? card).drivers;
@@ -114,6 +120,15 @@ export function DetailPanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 p-4">
+          <ActionBar
+            card={card}
+            actions={detail?.actions ?? []}
+            onRecorded={(result) => {
+              onActionRecorded(result);
+              setReloadKey((key) => key + 1);
+            }}
+          />
+
           <Section title="Why this priority">
             {drivers.length === 0 ? (
               <p className="text-sm text-ink-subtle">
@@ -199,9 +214,53 @@ export function DetailPanel({
               <p className="text-sm text-ink-subtle">Loading evidence…</p>
             )}
           </Section>
+
+          {detail && detail.actions.length > 0 && (
+            <Section title="Operator activity">
+              <ActionHistory actions={detail.actions} />
+            </Section>
+          )}
         </div>
       </div>
     </aside>
+  );
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  mark_reviewed: "Marked reviewed",
+  mark_resolved: "Marked resolved",
+  thumbs_down: "Flagged summary as unhelpful",
+  thumbs_up: "Marked summary as helpful",
+};
+
+/**
+ * Newest first. Exists so the persistence is visible rather than implied — the
+ * audit log is append-only, so a finding reviewed twice shows twice, which is
+ * the honest record even though `reviewed_at` only moved once.
+ */
+function ActionHistory({ actions }: { actions: OperatorActionRecord[] }) {
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {actions.map((action) => (
+        <li key={action.id} className="text-sm">
+          <span className="text-ink">
+            {ACTION_LABELS[action.actionType] ?? action.actionType}
+          </span>
+          <span className="text-ink-subtle">
+            {" · "}
+            {action.actor}
+            {action.version !== null && ` · v${action.version}`}
+            {" · "}
+            <TimeAgo iso={action.createdAt} />
+          </span>
+          {action.note && (
+            <p className="mt-0.5 border-l-2 border-line pl-2 text-ink-muted">
+              &ldquo;{action.note}&rdquo;
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 

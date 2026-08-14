@@ -15,6 +15,7 @@ import type {
   FindingCard,
   FindingDetail,
   FindingStatus,
+  OperatorActionRecord,
   QueueCounts,
   RecommendedAction,
 } from "./types";
@@ -68,6 +69,16 @@ function parseActions(raw: unknown): RecommendedAction[] {
   return parsed.success ? parsed.data : [];
 }
 
+// The audit row's context is jsonb written by recordAction, but a hand-edited
+// or older row could carry anything. Only the version is needed for display, and
+// its absence is not worth failing a panel render over.
+const contextVersionSchema = z.object({ version: z.number() });
+
+function parseContextVersion(raw: unknown): number | null {
+  const parsed = contextVersionSchema.safeParse(raw);
+  return parsed.success ? parsed.data.version : null;
+}
+
 function parseCitedEventIds(raw: unknown): string[] | null {
   if (raw === null || raw === undefined) return null;
   const parsed = stringArraySchema.safeParse(raw);
@@ -106,6 +117,8 @@ type CardRow = {
   enriched_version: number | null;
   updated_at: unknown;
   closed_at: unknown;
+  reviewed_at: unknown;
+  resolved_at: unknown;
   retry_attempts: number | null;
   retry_max_attempts: number | null;
   retry_next_attempt_at: unknown;
@@ -134,6 +147,8 @@ function toCard(row: CardRow): FindingCard {
     enrichedVersion: row.enriched_version,
     updatedAt: toIso(row.updated_at),
     closedAt: toIsoOrNull(row.closed_at),
+    reviewedAt: toIsoOrNull(row.reviewed_at),
+    resolvedAt: toIsoOrNull(row.resolved_at),
     retry:
       row.retry_attempts === null || row.retry_max_attempts === null
         ? null
@@ -150,7 +165,7 @@ const CARD_COLUMNS = sql`
   f.priority_drivers, f.issue, (f.summary IS NOT NULL) AS has_summary,
   f.summary_source, f.extracted_tags,
   f.event_count, f.first_event_at, f.last_event_at, f.enriched_at,
-  f.enriched_version, f.updated_at, f.closed_at
+  f.enriched_version, f.updated_at, f.closed_at, f.reviewed_at, f.resolved_at
 `;
 
 // A finding's retry state is a property of the jobs behind its evidence, not of
@@ -252,6 +267,29 @@ export async function findingDetail(findingId: string): Promise<FindingDetail | 
     cited: cited.has(item.id),
   }));
 
+  const actionRows = await db.execute<{
+    id: string;
+    action_type: string;
+    note: string | null;
+    actor: string;
+    created_at: unknown;
+    context: unknown;
+  }>(sql`
+    SELECT id, action_type, note, actor, created_at, context
+    FROM operator_actions
+    WHERE finding_id = ${findingId}
+    ORDER BY created_at DESC, id DESC;
+  `);
+
+  const actions: OperatorActionRecord[] = actionRows.map((item) => ({
+    id: item.id,
+    actionType: item.action_type,
+    note: item.note,
+    actor: item.actor,
+    createdAt: toIso(item.created_at),
+    version: parseContextVersion(item.context),
+  }));
+
   return {
     ...toCard(row),
     summary: row.summary,
@@ -259,6 +297,7 @@ export async function findingDetail(findingId: string): Promise<FindingDetail | 
     llmModel: row.llm_model,
     citedEventIds,
     evidence,
+    actions,
   };
 }
 

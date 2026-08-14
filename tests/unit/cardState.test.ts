@@ -25,6 +25,8 @@ function card(overrides: Partial<FindingCard> = {}): FindingCard {
     enrichedVersion: 2,
     updatedAt: LAST_EVENT_AT,
     closedAt: null,
+    reviewedAt: null,
+    resolvedAt: null,
     retry: null,
     ...overrides,
   };

@@ -579,9 +579,13 @@ breaks, nothing is lost, because no permanent business data lives outside Postgr
 ## Operator feedback loop
 <!-- OWNER: design-chat -->
 
-_TODO_ — what the persisted operator action is, and how this feedback improves the
-product/model over time (eval set from thumbs-down, prompt iteration, threshold
-tuning, precision measurement). Explicitly requested by the brief.
+An operator can mark a finding reviewed, mark it resolved, or flag it as unhelpful with an optional note. All three persist to an append-only operator_actions log; the first two also set current-state fields on the finding, so the audit trail and the board can't disagree.
+
+The one that matters for the product over time is the negative flag, and it captures more than a thumb. A finding's summary is overwritten by the next enrichment — feedback storing only a finding id would preserve the operator's judgment and lose the thing they judged. So each flag snapshots the artifact under judgment: the exact issue and summary text, the recommended actions, the model that wrote them, whether the model ran at all, the citations, and the finding's version, priority, and status at that moment. Evidence is stored by reference rather than copied, because events is append-only and ids rehydrate the model's input exactly, while findings mutate and their output has to be preserved.
+
+That asymmetry is what turns each flag into a complete eval row: input, output, judgment, and provenance. A hundred of them are a golden set — which is precisely what this build lacks, and the first thing I'd use them for.
+
+Three things I'd do with that data. Run prompt changes against the flagged set and measure whether they'd now produce something acceptable, so a prompt edit stops being a guess. Segment flags by summary_source to separate "the model wrote something wrong" from "the fallback was inadequate here" — different problems with different fixes. And check flags against priority, because a cluster on one severity level is more likely a threshold that's miscalibrated than a model that's wrong; the thresholds are deterministic constants and adjusting them is cheaper and safer than adjusting a prompt.
 
 ---
 

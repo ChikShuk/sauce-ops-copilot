@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { BoardMessage } from "@/lib/realtime/broadcaster";
 import type { FindingCard as FindingCardData, QueueCounts } from "@/lib/findings/types";
+import type { ActionResult } from "./ActionBar";
 import { DetailPanel } from "./DetailPanel";
 import { EmptyBoard, NoSelection } from "./EmptyStates";
 import { FindingCard } from "./FindingCard";
@@ -31,6 +32,12 @@ export function FindingsBoard({
   // action. Collapsed once there are findings, so it doesn't eat board height
   // for someone who is reading rather than generating.
   const [simulatorOpen, setSimulatorOpen] = useState(initialFindings.length === 0);
+  const [resolvedOpen, setResolvedOpen] = useState(false);
+  // Applied locally the moment an action succeeds, because waiting for the next
+  // poll would leave up to a second of nothing after a click. Safe here for a
+  // reason specific to this build: every SSE message is a complete board, so
+  // there is no patch to merge and local state cannot drift permanently.
+  const [optimistic, setOptimistic] = useState<Map<string, ActionResult>>(new Map());
 
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -47,6 +54,27 @@ export function FindingsBoard({
       setConnection("live");
       setFindings(message.findings);
       setQueue(message.queue);
+
+      // Clear an overlay only once the server confirms the field is set, not on
+      // the next message unconditionally. A snapshot polled between the click
+      // and the commit would otherwise flick the card back to unresolved.
+      setOptimistic((current) => {
+        if (current.size === 0) return current;
+
+        const next = new Map(current);
+        for (const finding of message.findings) {
+          const pending = next.get(finding.id);
+          if (!pending) continue;
+
+          const reviewedSettled =
+            pending.reviewedAt === null || finding.reviewedAt !== null;
+          const resolvedSettled =
+            pending.resolvedAt === null || finding.resolvedAt !== null;
+
+          if (reviewedSettled && resolvedSettled) next.delete(finding.id);
+        }
+        return next.size === current.size ? current : next;
+      });
 
       if (message.changed.length > 0) {
         setHighlighted((current) => new Set([...current, ...message.changed]));
@@ -80,7 +108,31 @@ export function FindingsBoard({
     };
   }, []);
 
-  const selected = findings.find((finding) => finding.id === selectedId) ?? null;
+  const merged = findings.map((finding) => {
+    const pending = optimistic.get(finding.id);
+    return pending
+      ? {
+          ...finding,
+          reviewedAt: pending.reviewedAt ?? finding.reviewedAt,
+          resolvedAt: pending.resolvedAt ?? finding.resolvedAt,
+        }
+      : finding;
+  });
+
+  // Partitioned on resolvedAt, never on closedAt. Resolving sets both, but a
+  // finding whose rolling window merely lapsed also has closedAt set and is
+  // history an operator should still see — filtering on it would silently hide
+  // every past finding on the board (docs/decisions.md).
+  //
+  // Client-side, so the SQL ordering stays the single source of sort order.
+  const active = merged.filter((finding) => finding.resolvedAt === null);
+  const resolved = merged.filter((finding) => finding.resolvedAt !== null);
+
+  const selected = merged.find((finding) => finding.id === selectedId) ?? null;
+
+  function applyAction(findingId: string, result: ActionResult) {
+    setOptimistic((current) => new Map(current).set(findingId, result));
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -108,7 +160,7 @@ export function FindingsBoard({
               child shrink below its content — without it the pane grows to fit
               every card and the overflow never engages. */}
           <div className="min-h-0 w-full shrink-0 overflow-y-auto md:w-[26rem]">
-            {findings.map((finding) => (
+            {active.map((finding) => (
               <FindingCard
                 key={finding.id}
                 finding={finding}
@@ -119,11 +171,47 @@ export function FindingsBoard({
                 }
               />
             ))}
+
+            {/* Resolved work leaves the working list but stays findable. Making
+                it vanish outright would make the action feel irreversible and
+                would take away the only evidence that anything happened. */}
+            {resolved.length > 0 && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setResolvedOpen((open) => !open)}
+                  aria-expanded={resolvedOpen}
+                  className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-xs text-ink-subtle hover:bg-surface"
+                >
+                  <span aria-hidden>{resolvedOpen ? "▾" : "▸"}</span>
+                  Resolved ({resolved.length})
+                </button>
+
+                {resolvedOpen &&
+                  resolved.map((finding) => (
+                    <FindingCard
+                      key={finding.id}
+                      finding={finding}
+                      selected={finding.id === selectedId}
+                      highlighted={highlighted.has(finding.id)}
+                      onSelect={() =>
+                        setSelectedId((current) =>
+                          current === finding.id ? null : finding.id,
+                        )
+                      }
+                    />
+                  ))}
+              </div>
+            )}
           </div>
 
           <div className="hidden min-h-0 min-w-0 flex-1 md:block">
             {selected ? (
-              <DetailPanel card={selected} onClose={() => setSelectedId(null)} />
+              <DetailPanel
+                card={selected}
+                onClose={() => setSelectedId(null)}
+                onActionRecorded={(result) => applyAction(selected.id, result)}
+              />
             ) : (
               <NoSelection />
             )}
@@ -138,7 +226,11 @@ export function FindingsBoard({
           exactly as the desktop pane does. */}
       {selected && (
         <div className="fixed inset-0 z-20 h-dvh bg-canvas md:hidden">
-          <DetailPanel card={selected} onClose={() => setSelectedId(null)} />
+          <DetailPanel
+            card={selected}
+            onClose={() => setSelectedId(null)}
+            onActionRecorded={(result) => applyAction(selected.id, result)}
+          />
         </div>
       )}
     </div>

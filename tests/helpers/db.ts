@@ -48,6 +48,8 @@ export type FindingRow = {
   enriched_at: string | null;
   enriched_version: number | null;
   priority_drivers: { signal: string; level: string; detail: string }[] | null;
+  reviewed_at: string | null;
+  resolved_at: string | null;
 };
 
 export async function findingsFor(restaurantId: string): Promise<FindingRow[]> {
@@ -56,7 +58,7 @@ export async function findingsFor(restaurantId: string): Promise<FindingRow[]> {
            event_count, first_event_at, last_event_at, closed_at,
            issue, summary, recommended_actions, extracted_tags,
            cited_event_ids, summary_source, llm_model, enriched_at,
-           enriched_version, priority_drivers
+           enriched_version, priority_drivers, reviewed_at, resolved_at
     FROM findings
     WHERE restaurant_id = ${restaurantId}
     ORDER BY first_event_at ASC;

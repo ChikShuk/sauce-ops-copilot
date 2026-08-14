@@ -45,8 +45,25 @@ export type FindingCard = {
   enrichedVersion: number | null;
   updatedAt: string;
   closedAt: string | null;
+  // Operator-owned, unlike closedAt. `resolvedAt` is what the board partitions
+  // on — closedAt must never be used for that (docs/decisions.md): a finding
+  // whose window merely lapsed is history an operator should still see, while a
+  // resolved one is finished work.
+  reviewedAt: string | null;
+  resolvedAt: string | null;
   // The soonest-retrying job among this finding's evidence, if any.
   retry: RetryState | null;
+};
+
+export type OperatorActionRecord = {
+  id: string;
+  actionType: string;
+  note: string | null;
+  actor: string;
+  createdAt: string;
+  // The finding version the operator was looking at. Read off the stored
+  // context so the history can say which summary a thumbs-down was about.
+  version: number | null;
 };
 
 export type EvidenceItem = {
@@ -80,6 +97,9 @@ export type FindingDetail = FindingCard & {
   // no citations rather than citing everything.
   citedEventIds: string[] | null;
   evidence: EvidenceItem[];
+  // Newest first. Shown in the panel so persistence is visible rather than
+  // implied — without it there is no way to see that anything was written.
+  actions: OperatorActionRecord[];
 };
 
 // Job-level health, for work that has no finding to attach a badge to yet.
