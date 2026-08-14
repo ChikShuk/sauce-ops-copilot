@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   check,
   index,
@@ -145,7 +145,7 @@ export const findings = pgTable(
   (table) => [
     index("findings_status_idx").on(table.status),
     index("findings_priority_idx").on(table.priority),
-    index("findings_last_event_at_idx").on(table.lastEventAt),
+    index("findings_last_event_at_idx").on(desc(table.lastEventAt)),
     // At most one open finding per restaurant. Also serves as the
     // open-finding lookup index for correlation matching.
     uniqueIndex("findings_restaurant_id_open_key")

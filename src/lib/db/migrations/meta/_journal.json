@@ -15,6 +15,13 @@
       "when": 1786729241389,
       "tag": "0001_set_updated_at_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786731485624,
+      "tag": "0002_peaceful_sage",
+      "breakpoints": true
     }
   ]
 }
