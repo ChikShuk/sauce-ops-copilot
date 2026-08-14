@@ -143,6 +143,16 @@ export const findings = pgTable(
     version: integer("version").notNull().default(1),
     status: text("status").notNull().default("accepted"),
     priority: text("priority"),
+    // Which severity signals fired and why, as returned by scorePriority().
+    // Correlation-owned and written in the same UPDATE as `priority`, so the
+    // two can never disagree.
+    //
+    // Persisted because until slice 6 the system's own severity reasoning was
+    // visible only to the language model — it went into the prompt and was
+    // then discarded. The operator could see *that* a finding was critical but
+    // never *why*, which puts the least trustworthy element (the prose) in
+    // charge of explaining the most trustworthy one (the threshold rules).
+    priorityDrivers: jsonb("priority_drivers"),
     // Short LLM-generated title, same lifecycle as summary: nullable until
     // first enrichment, degrades to a fallback title on LLM failure.
     issue: text("issue"),
@@ -166,9 +176,18 @@ export const findings = pgTable(
     // tell pre- from post-model-change rows apart. NULL on fallback rows.
     llmModel: text("llm_model"),
     // When the prose was written, which is not updated_at — correlation touches
-    // that too. The gap between this and last_event_at is how "prose is stale
-    // relative to evidence" becomes visible.
+    // that too. Display only.
     enrichedAt: timestamp("enriched_at", { withTimezone: true }),
+    // Which version of the evidence set the prose describes, copied from the
+    // version enrichment fenced its write on.
+    //
+    // This, not enriched_at, is how "the prose is behind the evidence" is
+    // detected: `enriched_version < version`. Comparing enriched_at against
+    // last_event_at would mix two different clocks — enriched_at is wall time,
+    // last_event_at is the business time an event occurred, which for a
+    // backfill is days in the past — so that comparison is false in normal
+    // operation and true for reasons that have nothing to do with staleness.
+    enrichedVersion: integer("enriched_version"),
     eventCount: integer("event_count").notNull().default(0),
     firstEventAt: timestamp("first_event_at", { withTimezone: true }).notNull(),
     lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),

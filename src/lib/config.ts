@@ -22,6 +22,19 @@ export const PROCESSING_TIMEOUT_MS =
 // claim, so this is never a per-job tax. See src/worker/index.ts.
 export const POLL_INTERVAL_MS = 1_000;
 
+// How often the dashboard's shared poller re-reads the board. One query per
+// tick for the whole process regardless of how many browsers are connected —
+// see lib/realtime/broadcaster.ts.
+//
+// Matched to POLL_INTERVAL_MS deliberately: end-to-end latency is already
+// floored by how fast a worker notices a job, so a faster board poll would buy
+// nothing and a slower one would be the visible bottleneck.
+export const BOARD_POLL_INTERVAL_MS = 1_000;
+
+// Proxies and load balancers close a quiet connection. An SSE comment line is
+// the cheapest thing that counts as traffic.
+export const SSE_KEEPALIVE_MS = 15_000;
+
 // How far from a finding's nearest evidence edge an event may fall and still
 // belong to it. Consecutive evidence within one finding is therefore never more
 // than this far apart. Interacts with two things worth keeping in view:

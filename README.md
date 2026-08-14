@@ -33,7 +33,19 @@ in `.env` for real model-generated summaries.
 ## What this does
 <!-- OWNER: agent | slice: 6 (once the UI exists and the loop is visible) -->
 
-_TODO_ — 2–3 sentences. What an operator sees and what problem it solves.
+A restaurant operator gets a stream of individual operational events — a late delivery, a
+complaint, a refund, a one-star review — and no way to tell which of them are the same
+problem. This system correlates them into **findings**, ranks each one by deterministic
+threshold rules, attaches the evidence it was built from, and has a language model write
+the summary and the recommended actions.
+
+The dashboard is a live board of those findings, worst first. A collapsed card carries the
+priority, the pattern name, and the deterministic reason for the ranking — "95 minute delay
+· 2-star review · +1 more" — so the scan happens over facts the system knows to be true.
+Clicking one opens the summary, the actions, and every event underneath it, with the
+evidence the summary actually cites marked. Findings appear the moment they correlate and
+fill in as the model catches up, so processing delay shows as a state rather than an empty
+screen.
 
 ---
 
@@ -42,15 +54,85 @@ _TODO_ — 2–3 sentences. What an operator sees and what problem it solves.
 ### Components
 <!-- OWNER: agent | slice: 6 -->
 
-_TODO_ — API responsibilities, database responsibilities, queue responsibilities,
-worker responsibilities, frontend architecture, AI-provider boundary, realtime
-mechanism.
+**Ingestion API** (`POST /api/restaurants/:id/events`) validates with Zod, normalizes,
+derives `issue_class` from structured fields, and writes the event and its job row in one
+statement. Then it returns. No correlation, no model call, nothing on the request path that
+can slow down under load — a spike shows up as queue depth, not as API latency.
+
+**Postgres** is the durable store, the queue, and the outbox. `events` is immutable and
+append-only. `event_jobs` is 1:1 with it and carries status, attempts, backoff and a claim
+token. `findings` are living, versioned entities; `finding_events` is the evidence join and
+the only source evidence is ever assembled from. There is no Redis and no broker, so the
+"write the event, then publish it" gap does not exist to be crashed in.
+
+**Queue** is `SELECT ... FOR UPDATE SKIP LOCKED` inside the claiming `UPDATE`, so two
+workers can never hold one job. Claiming mints a fresh `claim_token` that the disposition
+write replays, so a worker stale-reclaimed mid-flight updates zero rows instead of
+clobbering its replacement.
+
+**Worker** is a separate Node process. It claims a job, correlates the event, scores its
+priority, then calls the model. Correlation and scoring are deterministic and committed
+before the model is involved; an LLM outage degrades the prose and never fails the job.
+
+**AI provider boundary** is `EnrichmentProvider` with two implementations — Anthropic and a
+deterministic fallback — selected by `LLM_PROVIDER`. Every call has a timeout, a bounded
+retry, schema validation, an action allowlist, and citation checking against the evidence
+set. Any failure falls through to the fallback writer. Which fields the model owns and
+which code owns is the table above.
+
+**Realtime** is one server-sent-events endpoint (`GET /api/stream`) fed by a single
+process-wide poller. The poller re-reads the board once a second and fans it out to every
+connected browser in memory — one query per tick regardless of client count. Each message
+is the whole ordered board plus the ids that changed.
+
+**Frontend** is a Server Component that renders the current board for the first paint, and
+one client component that subscribes to the stream and replaces its state on each message.
+All the logic worth testing — which of the five card states a finding is in, how the
+drivers line is truncated — lives in pure functions in `lib/findings/cardState.ts`, so the
+components stay thin and no browser test harness is needed. The detail panel is fetched on
+demand and re-fetched when its finding's `version` or `status` moves.
 
 ### Data flow
 <!-- OWNER: agent | slice: 6 -->
 
-_TODO_ — Mermaid diagram: UI submission → ingestion API → outbox → queue → worker →
-correlation → LLM → persisted finding → SSE → dashboard.
+```mermaid
+flowchart TD
+    SIM["Operator / simulator"] -->|POST event| API["Ingestion API<br/>validate · normalize · derive issue_class"]
+
+    API -->|"event + event_jobs, one statement"| DB[("Postgres")]
+    API -->|"returns immediately, with duplicate flag"| SIM
+
+    DB -->|"SELECT … FOR UPDATE SKIP LOCKED"| W["Worker process"]
+
+    W --> CORR["Correlation<br/><i>deterministic</i>"]
+    CORR --> PRI["Priority rules<br/><i>deterministic</i>"]
+    PRI -->|"finding + evidence + priority<br/>+ drivers COMMITTED"| DB
+
+    PRI --> ENR["Enrichment"]
+    ENR -->|"evidence as opaque labels E1..En"| LLM["Anthropic<br/>claude-sonnet-5"]
+    LLM -->|"structured output"| VAL{"Schema · allowlist ·<br/>citations valid?"}
+    VAL -->|yes| WRITE["prose, actions, tags, citations<br/><i>fenced on findings.version</i>"]
+    VAL -->|"no — 1 regeneration, then give up"| FB["Deterministic fallback writer"]
+    ENR -.->|"timeout / outage"| FB
+    FB --> WRITE
+    WRITE --> DB
+
+    W -->|"retries exhausted"| DLQ["dead_letter<br/>finding marked failed"]
+    DLQ --> DB
+
+    DB -->|"1s poll, one per process"| BC["Broadcaster<br/>fingerprint diff"]
+    BC -->|"SSE: whole board + changed ids"| UI["Dashboard"]
+    UI -->|"reconnect = fresh snapshot"| BC
+
+    classDef det fill:#0b3d2e,stroke:#10b981,color:#ecfdf5
+    classDef model fill:#3b2f0b,stroke:#f59e0b,color:#fffbeb
+    class CORR,PRI det
+    class LLM,VAL model
+```
+
+Green is deterministic, amber is the model. The finding exists, is prioritized, and has its
+evidence before the amber path is entered — and every route out of the amber path, success
+or failure, ends at the same write.
 
 ### Deterministic vs. LLM boundary
 <!-- OWNER: agent | slice: 5 (LLM integration) -->
@@ -62,6 +144,7 @@ Every field on a finding, and who writes it:
 | `restaurant_id`, `order_id` | code | `order_id` is display-only; never part of matching |
 | `version` | code (correlation) | Bumped on every evidence change. Enrichment reads it as a fence and never writes it |
 | `priority` | code (`correlation/priority.ts`) | Threshold table, max across signals. The model is told the priority and forbidden to restate or guess one |
+| `priority_drivers` | code (`correlation/priority.ts`) | Which signals fired and why. Written in the same statement as `priority`, so the two cannot disagree. This is what the card's drivers line renders |
 | `event_count`, `first_event_at`, `last_event_at` | code | Recomputed from the evidence set, never incremented |
 | `finding_events` (the evidence) | code | Assembled from the database. Never from model output |
 | `closed_at` | code (correlation) | Rolling-window lifecycle marker |
@@ -72,6 +155,7 @@ Every field on a finding, and who writes it:
 | `extracted_tags` | **model**, from a fixed enum | Finer-grained read of free text than `issue_class`. Drives nothing |
 | `cited_event_ids` | **model's choice, code's mapping** | The model cites opaque labels `E1..En`; code validates the set and maps it back to real ids |
 | `summary_source`, `llm_model`, `enriched_at` | code | Provenance for the four fields above |
+| `enriched_version` | code | Which `version` the prose describes. `enriched_version < version` means the summary has fallen behind the evidence |
 
 The model never decides what is true, only how it reads. Take the model away entirely and
 a finding still has its evidence, its priority, the reason for that priority, and a
@@ -307,6 +391,34 @@ If summary quality turns out to be the weak point, the model id is a one-line ch
 the provider interface absorbs it. The claim is not that Sonnet is sufficient for
 everything; it is that this task was made small enough that it doesn't need more.
 
+### Real-time: every connect is a snapshot
+<!-- slice: 6 -->
+
+**Snapshot-on-connect makes reconnect correct by construction.** Every SSE message is a
+complete, ordered board plus the ids that changed — not an initial snapshot followed by
+patches. A reconnect and a routine update travel identical code, so "the client missed
+something while it was disconnected" is not a state that can exist, and there is no
+`Last-Event-ID` bookkeeping to get wrong. That is the whole answer to the brief's
+disconnect-and-reconnect case. The `changed` ids exist only so the UI can briefly highlight
+what moved; nothing about correctness depends on them.
+
+It cost a few KB per change instead of a few hundred bytes, and it keeps the sort order
+server-side — a client that re-sorted a patched map locally would be a second
+implementation of the priority ranking, free to drift from the one in SQL.
+
+The trigger is a single process-wide poller at 1s, fanning out in memory, rather than
+Postgres `LISTEN/NOTIFY`. Same reasoning that killed the outbox relay: `NOTIFY` buys about
+a second against a worker that already polls at 1s, and costs a dedicated connection plus a
+missed-notification hole during listener reconnects that needs a watermark catch-up anyway.
+The shared-subscription-and-fanout split is the shape `NOTIFY` would need regardless, so
+swapping it in later is one file.
+
+One bug this design was supposed to prevent still got in, and only a real reconnect found
+it: the poller stops when the last client leaves, and `subscribe()` was serving its frozen
+cache to the next client. A browser that disconnected and came back saw a finding as
+`accepted` that the worker had already marked `failed`. `subscribe()` now always reads
+fresh, and an integration test changes the database while nobody is subscribed.
+
 ---
 
 ## Architectural conditions
@@ -322,11 +434,11 @@ same event produce one row of each, and the API returns `{status: "accepted",
 duplicate: true, id: <the original row's id>}` on every resubmission after the
 first. Duplicate findings can't arise from this path either, since a duplicate event
 never reaches `event_jobs` at all — there's nothing left for a worker or correlation
-step to double-process. Two parts of this answer aren't built yet, and are out of
-scope until their slices land: worker-side redelivery safety (checking
-`event_jobs.status` before processing a claimed row — slice 3) and what the UI shows
-(slice 6/7) — though the `duplicate` boolean and `id` are already in the response,
-ready for the UI to consume once it exists.
+step to double-process. Worker-side redelivery safety landed in slice 3 (the claim
+statement transitions the row it claims, and correlation carries its own redelivery
+guard). The response's `duplicate` boolean and `id` are what the slice-7 simulator will
+surface in the UI; the dashboard itself has nothing to show for a duplicate, because a
+duplicate correctly produces no new finding and no new evidence.
 
 ### Out-of-order events
 <!-- OWNER: agent | slice: 4 -->
@@ -338,8 +450,9 @@ and then drag its window six days back, after which it would swallow everything 
 restaurant.
 
 Findings are **updated, never regenerated**. New evidence attaches, the denormalized
-fields are recomputed from the evidence set, and `version` increments — which is what
-slice 6's SSE will key on to push an update. Recomputing rather than incrementing means
+fields are recomputed from the evidence set, and `version` increments — which is what the
+dashboard's change detection keys on, and what tells a summary written for three events
+from the four the finding now holds. Recomputing rather than incrementing means
 the aggregates converge after a partially applied or retried run instead of drifting
 permanently once wrong.
 
@@ -385,11 +498,18 @@ token still matches, so a superseded worker updates zero rows and logs
 `job.disposition_superseded`. Verified with two workers against twelve events —
 all twelve finished with `attempts = 1`, meaning no job was ever claimed twice.
 
-**Duplicate findings** aren't reachable from this path yet: correlation lands in
-slice 4, and `finding_events` already carries a `UNIQUE(event_id)` constraint so
-one event can only ever evidence one finding. **Inconsistent UI state** is out of
-scope until slice 6 — nothing reads job status from the UI yet, so the worker's
-only observable effect today is the row transition and its log lines.
+**Duplicate findings** aren't reachable from this path: `finding_events` carries a
+`UNIQUE(event_id)` constraint, so one event can only ever evidence one finding.
+
+**Inconsistent UI state** is handled by making every SSE message a complete board rather
+than a patch, so the dashboard cannot drift from the database by accumulating updates —
+and by making a reconnect identical to a first connection, so there is no catch-up path
+to get wrong. The one case that needed real work is the reverse: a finding whose *prose*
+falls behind its evidence, when a worker dies after correlation commits and before
+enrichment writes. That is detected by `enriched_version < version`, shown on the card,
+and repaired on the redelivery that the un-acked job guarantees. Retrying work that has no
+finding yet — because it failed before correlation committed — is visible in the header
+strip's counts rather than silently absent.
 
 ### Traffic spike (100,000 events in 10 minutes)
 What absorbs the burst. Ingestion writes the event and its job row in a single statement and returns as soon as that commits — no LLM call, no correlation, nothing on the request path that can slow down under load. A spike therefore shows up as queue depth in event_jobs, not as API latency or dropped events. The API degrades by getting behind, not by getting slow, which is the failure mode you want.
@@ -477,7 +597,6 @@ These are deliberate scope decisions, not oversights. Each one is a place where 
 **The window is a constant.** Three hours is hardcoded, not tuned per restaurant. A high-volume location during dinner rush and a quiet one at 3pm get the same window, which is wrong in both directions. Tuning this needs volume data I don't have.
 
 **Correlation can't see what a complaint is about.** Grouping uses `restaurant_id` and time only. LLM-extracted tags like `missing_items` are shown on the card for context but are deliberately never read by correlation code, because model output must not silently decide which events belong together. The natural next step is a hybrid — rules first, with the model proposing merges for leftovers as a suggestion an operator confirms, never as a silent write.
-<!-- slice 6: verify true once dashboard exists -->
 
 **Backfilled events don't correlate with each other.** An event arriving more than 3 hours before an open finding's window gets its own finding, created already closed, so a live incident isn't hijacked by week-old data. The cost is that two backfills minutes apart become two separate findings, since the lookup only sees open ones. The brief's out-of-order case is events minutes apart, which works correctly; this only affects genuine historical replay.
 
@@ -486,7 +605,6 @@ These are deliberate scope decisions, not oversights. Each one is a place where 
 **Multi-worker is safe but unproven at scale.** Claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`, and I verified two concurrent workers against twelve events with no job processed twice, plus a forced insert-race on the correlation path. What I haven't done is run this under real load — and the polling interval still sets a floor on end-to-end latency that a broker with push delivery wouldn't have.
 
 **No authentication, no tenant isolation.** Any caller can post events for any `restaurant_id`, and the dashboard shows every restaurant's findings. The brief excludes auth, so this is expected, but it means the multi-tenancy in the schema (tenant-scoped idempotency keys, per-restaurant correlation) is structural rather than enforced.
-<!-- slice 6: verify true once dashboard exists -->
 
 **No per-tenant rate limiting or LLM spend control.** A single restaurant flooding events would consume worker capacity and LLM budget other tenants need. The queue absorbs the burst safely — the API stays responsive and nothing is lost — but processing is FIFO across all tenants with no fairness guarantee.
 

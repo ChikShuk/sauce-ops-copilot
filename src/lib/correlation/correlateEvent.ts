@@ -160,6 +160,10 @@ async function runCorrelationTxn(event: CorrelatableEvent): Promise<CorrelationR
     // Denormalized fields are recomputed from the evidence set rather than
     // incremented, so they converge after a partially applied run instead of
     // drifting permanently.
+    //
+    // priority_drivers is written here and nowhere else, in the same statement
+    // as priority itself — the two are one decision and must not be able to
+    // disagree.
     const [updated] = await exec.execute<{ version: number }>(sql`
       UPDATE findings
       SET version = version + 1,
@@ -167,7 +171,8 @@ async function runCorrelationTxn(event: CorrelatableEvent): Promise<CorrelationR
           first_event_at = ${summary.firstEventAt.toISOString()},
           last_event_at = ${summary.lastEventAt.toISOString()},
           order_id = COALESCE(order_id, ${summary.orderId}),
-          priority = ${priority}
+          priority = ${priority},
+          priority_drivers = ${JSON.stringify(drivers)}::jsonb
       WHERE id = ${findingId}
       RETURNING version;
     `);

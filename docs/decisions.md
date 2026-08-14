@@ -352,3 +352,73 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Decision:** Extracted `runJob(workerId, provider?)` into `worker/runJob.ts`, returning `idle | succeeded | failed | dead_lettered`. `index.ts` keeps the looping, sleeping, and shutdown handling.
 **Alternatives:** Re-implementing claim -> process -> dispose inside the test (rejected — the test would then assert against a copy of the logic and stay green if the real loop broke). Running the worker as a subprocess (rejected — 15s of real backoff per test, and disposition assertions become log-scraping).
 **Consequence:** The test drives the same function the worker does, pulling `next_attempt_at` forward between iterations rather than waiting out the ladder. The backoff arithmetic stays unit-tested where it already was.
+
+## 2026-08-14 — Priority drivers are persisted, not just handed to the prompt
+
+**Context:** `scorePriority()` returns the drivers behind a priority — "95 minute delay", "3 delivery_delay events in 24h" — and `correlateEvent` carried them through memory into the prompt and then discarded them. The system's own severity reasoning was visible only to the language model. Building the dashboard made that backwards: the collapsed card's trust anchor is the deterministic explanation of the priority, and it could not be rendered from the database.
+**Decision:** `findings.priority_drivers` (jsonb), written by correlation's existing UPDATE in the same statement as `priority`, so the two cannot disagree. Never written by enrichment.
+**Alternatives:** Recomputing drivers at read time (rejected — the read path would run correlation's severity rules, which is a second implementation of the thresholds and needs the recurrence query too). Deriving an approximate line from `event_count` and `priority` alone (rejected — delay minutes and review ratings live in event payloads, so the card would either say less than it knows or read payloads on the render path).
+**Consequence:** One more jsonb column, and a second consumer for it that was not the reason to add it: the enrichment repair below reads the drivers back rather than recomputing them.
+
+## 2026-08-14 — Stale prose is detected by version, not by comparing timestamps
+
+**Context:** A worker that dies between correlation committing and enrichment writing leaves a finding whose prose describes fewer events than it now holds. The obvious signal was `enriched_at < last_event_at`.
+**Decision:** `findings.enriched_version`, copied from the version enrichment fenced its write on. Prose is stale exactly when `enriched_version < version`.
+**Alternatives:** `enriched_at < last_event_at` (rejected — it mixes two clocks. `enriched_at` is wall time; `last_event_at` is the business time an event *occurred*. Prose is always written after the event it describes happened, so for live traffic the comparison is false when staleness is real, and for a backfill the gap is days wide for reasons that have nothing to do with staleness). `updated_at > enriched_at` (rejected — every write bumps `updated_at`, including a status change, so it reports staleness that isn't there).
+**Consequence:** Caught by an integration test rather than by reasoning: the timestamp form was written first and the test failed against real rows. A backfill case is now asserted explicitly, where `enriched_at` is five days *after* `last_event_at` and the prose is still stale.
+
+## 2026-08-14 — The already_attached branch repairs stale prose instead of returning early
+
+**Context:** `processEvent` skipped enrichment whenever correlation returned `already_attached`, on the grounds that a redelivery changed nothing. For the crashed-winner case above that was wrong, and permanently so: the redelivery was the only event that would ever revisit the finding, and it returned early every time.
+**Decision:** That branch now checks `enriched_version < version` and re-enriches when it is behind, reading the drivers from `priority_drivers`.
+**Alternatives:** A background sweeper for findings with stale prose (rejected — a second scheduler for a case the queue already redelivers). Leaving it and only showing a badge (rejected — a finding permanently summarizing three of four events is a wrong answer on the dashboard, not a cosmetic gap).
+**Consequence:** The repair is guaranteed a chance to run, and the argument is worth stating: `enrichFinding` is called *before* `markSucceeded`, so stale prose always implies an un-acked job, and an un-acked job is always stale-reclaimed. A redelivery whose prose is current still costs no LLM call.
+
+## 2026-08-14 — SSE carries the whole board, and every connect is a snapshot
+
+**Context:** The brief tests disconnect-and-reconnect. The usual shape — an initial snapshot followed by incremental patches — makes reconnect a separate code path with its own catch-up logic, which is exactly the path that is never exercised until it matters.
+**Decision:** Every message is a complete, ordered board plus the ids that changed. A reconnect and a routine update travel identical code, so "the client missed something while disconnected" is not a state that exists.
+**Alternatives:** Deltas with a `Last-Event-ID` watermark (rejected — premature at a board of tens of rows, and it buys a bookkeeping bug). Client-side sorting of a patched map (rejected — the priority ordering would then exist in SQL and in TypeScript, free to drift; the same duplication argument that made the SQL derive its priority array from `PRIORITY_LEVELS`).
+**Consequence:** A few KB per change instead of a few hundred bytes, which is the right trade at this size and is named in the README as the thing to revisit first.
+
+## 2026-08-14 — One shared poller feeds every SSE client; no LISTEN/NOTIFY
+
+**Context:** Something has to notice that the database changed. Postgres `LISTEN/NOTIFY` was the obvious candidate, and would have extended the no-Redis argument from the queue to the bus.
+**Decision:** A single process-wide poller at 1s, fanning out to connected clients in memory. One query per tick regardless of client count.
+**Alternatives:** `LISTEN/NOTIFY` from correlation and enrichment (rejected on the same reasoning that killed the outbox relay: it buys roughly a second against a worker that already polls at 1s, and costs a dedicated connection plus a missed-notification hole during listener reconnects that needs a watermark catch-up anyway). Polling per connection (rejected — N browsers would mean N queries per second for identical data).
+**Consequence:** End-to-end latency is floored at about two seconds, one from each poll. The shared-subscription/fanout split is the shape `NOTIFY` would need anyway, so swapping it in later is one file.
+
+## 2026-08-14 — subscribe() always reads fresh, never serves the cached board
+
+**Context:** The poller stops when the last listener disconnects, which freezes the cached board at that moment. Serving that cache to the next client was the original implementation.
+**Decision:** Every `subscribe()` performs its own read before delivering the first message.
+**Alternatives:** Tracking cache age and refreshing past a threshold (rejected — a policy to get wrong in exchange for one query per browser connecting).
+**Consequence:** Found by disconnecting and reconnecting against a live worker, not by reading the code: the board reported a finding as `accepted` that the worker had already marked `failed`. It is the precise failure the snapshot-on-connect design exists to prevent, and it was invisible from the inside. Now covered by an integration test that changes the database while nobody is subscribed.
+
+## 2026-08-14 — `failed` splits into two card states, because it does not imply "no summary"
+
+**Context:** The plan assumed a failed finding has `summary IS NULL`, so its card renders an explicit empty state rather than a blank region.
+**Decision:** Two states. `failed_unanalyzed` (never enriched) says "Analysis failed — evidence below". `failed_stale` (prose from earlier evidence) says "Analysis failed — the summary below predates this failure" and still shows the prose.
+**Alternatives:** One failed state showing the surviving summary as normal (rejected — that presents prose written from a smaller evidence set as if it described the current finding).
+**Consequence:** `markFindingFailedForEvent` updates unconditionally by design, so a finding that was `ready` and then absorbed an event whose job dead-lettered keeps its old prose. The demo run produced exactly this: `failed` at v3 with prose from v2.
+
+## 2026-08-14 — The card shows the top two drivers; the panel shows all of them
+
+**Context:** Recurrence emits one driver per `issue_class`, so a card can carry four or more. "95 min delay · 4 related events · 3 delivery_delay in 24h · 2 complaint in 24h" does not fit anywhere useful.
+**Decision:** Two drivers plus "+N more" on the card, every driver with its signal and level in the detail panel. `scorePriority` already sorts strongest-first and JSON preserves order, so no re-sorting is needed on the read path.
+**Alternatives:** A single synthesized sentence (rejected — that is prose, and prose is the model's job). Showing all of them (rejected — the card stops being scannable, which is the only thing it is for).
+**Consequence:** An empty driver list renders "No severity threshold crossed" rather than a blank row — `scorePriority` returns no drivers at base priority, and a blank line on the card's trust anchor reads as a rendering bug.
+
+## 2026-08-14 — The model's title leads the card; the summary is not on it at all
+
+**Context:** The card's most visually dominant element is the `issue` title, which the model writes. That is the least trustworthy source in the most prominent position.
+**Decision:** Keep the title as the headline, put the deterministic drivers line directly beneath it at co-equal weight, and keep the prose summary off the card entirely — it lives in the detail panel.
+**Alternatives:** Leading with the drivers line (rejected — a column headed by raw metrics reads as a log, and telling "late deliveries" from "missing items" at a glance is exactly what naming the pattern buys). Putting the summary on the card in smaller type (rejected — "the model supports rather than leads" then depends on type sizes holding a line, instead of on structure).
+**Consequence:** Nothing on the collapsed card except the title and the tags comes from the model, so the three-second scan happens over facts the system knows to be true. A `fallback` card is marked degraded, because the template title ("Late deliveries (3 events)") otherwise restates the drivers line below it and looks like a stutter.
+
+## 2026-08-14 — Relative timestamps come from useSyncExternalStore, not an effect
+
+**Context:** The page is server-rendered and then hydrated. A relative time ("2 min ago") computed during SSR is stale before it paints, and any locale-dependent format differs between server and browser, which React reports as a hydration mismatch.
+**Decision:** A shared clock per interval exposed through `useSyncExternalStore`, whose server snapshot is `null`. The first paint and the hydration pass render an absolute UTC time; the ticking value takes over afterwards.
+**Alternatives:** `setState` inside a mount effect (rejected — the React lint rule forbids it, and correctly: it is a cascading render for something that is not React-owned state). Rendering relative times on the server (rejected — wrong the moment they arrive).
+**Consequence:** One timer per interval for the whole page rather than one per card.

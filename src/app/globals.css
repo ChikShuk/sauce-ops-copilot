@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
+/* One committed theme rather than a light/dark pair. An operations board is
+   looked at for hours in a kitchen office, and supporting two palettes would
+   double the surface on which priority colours have to stay distinguishable
+   for no benefit the brief asks for. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #09090b;
+  --foreground: #fafafa;
 }
 
 @theme inline {
@@ -12,15 +16,29 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Draws the eye to the row that moved without moving it. Deliberately slow to
+   fade: on a board that reorders itself, the operator needs long enough to
+   find where a card went. */
+@keyframes card-changed {
+  from {
+    background-color: rgb(59 130 246 / 0.16);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.card-changed {
+  animation: card-changed 2.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-changed {
+    animation: none;
+  }
 }

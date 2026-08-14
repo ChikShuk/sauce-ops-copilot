@@ -1,7 +1,12 @@
 import { sql } from "drizzle-orm";
-import { z } from "zod";
 import type { SqlExecutor } from "../correlation/evidence";
 import type { Priority } from "../correlation/priority";
+import {
+  readCustomerText,
+  readDelayMinutes,
+  readRating,
+  readRefundAmountCents,
+} from "../events/payload";
 import type { LabeledEvidence } from "./types";
 
 // Enrichment reads evidence separately from correlation rather than widening
@@ -10,44 +15,6 @@ import type { LabeledEvidence } from "./types";
 // can start branching on free text. Two readers over the same join is the
 // deterministic/model boundary made physical — the same reason correlation/ and
 // llm/ are separate folders.
-//
-// Payload is untyped jsonb whose shape varies by event_type, so read it
-// leniently: a malformed field yields null rather than throwing. A bad payload
-// must not cost a finding its summary.
-const delayPayload = z.object({ delay_minutes: z.number() });
-const ratingPayload = z.object({ rating: z.number() });
-const refundPayload = z.object({ refund_amount_cents: z.number() });
-const complaintPayload = z.object({ complaint_text: z.string() });
-const reviewPayload = z.object({ review_text: z.string() });
-
-function readDelayMinutes(payload: unknown): number | null {
-  const parsed = delayPayload.safeParse(payload);
-  return parsed.success ? parsed.data.delay_minutes : null;
-}
-
-function readRating(payload: unknown): number | null {
-  const parsed = ratingPayload.safeParse(payload);
-  return parsed.success ? parsed.data.rating : null;
-}
-
-function readRefundAmountCents(payload: unknown): number | null {
-  const parsed = refundPayload.safeParse(payload);
-  return parsed.success ? parsed.data.refund_amount_cents : null;
-}
-
-function readCustomerText(eventType: string, payload: unknown): string | null {
-  if (eventType === "complaint") {
-    const parsed = complaintPayload.safeParse(payload);
-    return parsed.success ? parsed.data.complaint_text : null;
-  }
-
-  if (eventType === "negative_review") {
-    const parsed = reviewPayload.safeParse(payload);
-    return parsed.success ? parsed.data.review_text : null;
-  }
-
-  return null;
-}
 
 type EnrichmentEvidenceRow = {
   event_id: string;

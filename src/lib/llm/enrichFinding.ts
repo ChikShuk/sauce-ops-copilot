@@ -112,7 +112,11 @@ export async function enrichFinding(
         }::jsonb,
         summary_source = ${enrichment.source},
         llm_model = ${enrichment.model},
-        enriched_at = now()
+        enriched_at = now(),
+        -- Records which evidence set this prose describes. The WHERE clause
+        -- below already pins version to expectedVersion, so this is that same
+        -- number written down where a reader can compare it later.
+        enriched_version = ${expectedVersion}
     WHERE id = ${findingId} AND version = ${expectedVersion}
     RETURNING id;
   `);

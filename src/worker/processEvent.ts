@@ -3,6 +3,7 @@ import { correlateEvent } from "../lib/correlation/correlateEvent";
 import type { events } from "../lib/db/schema";
 import { env } from "../lib/env";
 import { enrichFinding } from "../lib/llm/enrichFinding";
+import { findRepairTarget } from "../lib/llm/staleEnrichment";
 import type { EnrichmentProvider } from "../lib/llm/types";
 import { logJson } from "../lib/log";
 
@@ -57,11 +58,38 @@ export async function processEvent(
   }
 
   if (result.outcome === "already_attached") {
+    // A redelivery changed nothing, so there is normally no prose to write. The
+    // exception is the crashed-winner case: a worker that died between
+    // correlation committing and enrichment writing leaves prose describing
+    // fewer events than the finding now holds, and this branch returning early
+    // is the only reason that state was permanent instead of self-healing. See
+    // findRepairTarget for why redelivery is guaranteed to reach here.
+    const repair = await findRepairTarget(result.findingId);
+
+    if (!repair) {
+      logJson({
+        msg: "enrichment.skipped_redelivery",
+        event_id: event.id,
+        finding_id: result.findingId,
+      });
+      return;
+    }
+
     logJson({
-      msg: "enrichment.skipped_redelivery",
+      msg: "enrichment.repairing_stale_prose",
       event_id: event.id,
       finding_id: result.findingId,
+      version: repair.version,
     });
+
+    await enrichFinding(
+      {
+        findingId: result.findingId,
+        expectedVersion: repair.version,
+        drivers: repair.drivers,
+      },
+      provider,
+    );
     return;
   }
 
