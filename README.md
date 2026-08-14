@@ -183,10 +183,19 @@ scope until slice 6 — nothing reads job status from the UI yet, so the worker'
 only observable effect today is the row transition and its log lines.
 
 ### Traffic spike (100,000 events in 10 minutes)
-<!-- OWNER: human -->
-_TODO_ — queue absorption, worker scaling independent of API, backpressure, LLM
-concurrency and spend control, tenant isolation, UI responsiveness under lag.
-Mostly a reasoning answer, not implemented — say so plainly.
+What absorbs the burst. Ingestion writes the event and its job row in a single statement and returns as soon as that commits — no LLM call, no correlation, nothing on the request path that can slow down under load. A spike therefore shows up as queue depth in event_jobs, not as API latency or dropped events. The API degrades by getting behind, not by getting slow, which is the failure mode you want.
+
+How workers scale. The worker is a separate process from the Next.js app, so the two scale independently — a burst needs more workers, not more API capacity. Claiming uses SELECT ... FOR UPDATE SKIP LOCKED, so running N workers requires no code change and no coordination: each claim either wins a row or skips to the next. I verified this with two concurrent workers against twelve queued events — all twelve processed exactly once, split 7/5 across the workers, no job claimed twice. The loop also re-polls immediately after a successful claim and sleeps only when it finds an empty queue, so the poll interval is the cost of idling rather than a per-job tax; under load, throughput is bounded by processing time.
+
+What isn't built. Three of the mechanisms this scenario really needs are absent, and I'd rather name them than imply the system handles more than it does.
+
+There is no backpressure. Ingestion accepts events at whatever rate they arrive and the queue grows without limit. The first thing I'd add is a queue-depth ceiling per tenant — past a threshold, return 429 with Retry-After so producers slow down instead of the backlog silently growing into hours of lag. A second, gentler option is shedding by event type: a negative_review can wait; a delivery_delay during service can't.
+
+There is no global spend control. MAX_LLM_ATTEMPTS bounds retries per job, so a single event can't loop expensively, but nothing caps aggregate cost — 100,000 events would mean as many enrichment calls as they correlate into findings, at whatever rate the workers can issue them. Production needs a concurrency semaphore around the provider (a fixed number of in-flight calls, independent of worker count) and a per-tenant daily budget that degrades to the deterministic fallback provider rather than failing when exhausted. The fallback path already exists for outages, which means the graceful-degradation behavior for a budget cap is already built — it just isn't wired to a budget.
+
+There is no tenant isolation. Claiming is FIFO by next_attempt_at across all tenants, so one restaurant chain sending 100,000 events starves every other restaurant behind it in the queue. The schema is multi-tenant (tenant-scoped idempotency keys, per-restaurant correlation) but the queue is not. The fix I'd reach for first is claiming round-robin across distinct restaurant_id values rather than strictly oldest-first — a fairness quota rather than a separate queue per tenant, which would be a lot of machinery for the same outcome.
+
+What the operator sees while behind. Findings are created deterministically at correlation time and enriched afterward, so a finding appears on the dashboard — correctly prioritized, with its evidence attached — before the model has written anything about it. Under lag the operator sees a real, growing list of processing findings rather than an empty screen, and the summaries fill in as the workers catch up. Processing delay is visible as a state, not as an absence.
 
 ### Concurrent processing
 <!-- OWNER: agent | slice: 4 -->
