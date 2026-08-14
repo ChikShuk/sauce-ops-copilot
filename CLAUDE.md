@@ -135,7 +135,12 @@ if time runs out there is always a demoable product.
 3. **Worker loop** — claim from event_jobs with SKIP LOCKED, status transitions, retry, DLQ
 4. **Correlation** — grouping rules + priority rules, unit tested
 5. **LLM integration** — provider interface, fallback impl first, then Anthropic impl
-6. **SSE + dashboard** — live findings list, detail panel, evidence, status badges
+6. **SSE + dashboard** — live findings list, detail panel, evidence, status badges.
+   Also verify the two forward-looking claims in the README's "Known limitations" —
+   that `extracted_tags` are shown on the finding card, and that the dashboard shows
+   every restaurant's findings. Both were written true-of-slice-6 and marked inline
+   with `<!-- slice 6: verify true once dashboard exists -->`; check them rather than
+   assume them.
 7. **Event simulator** — buttons for delay / complaint / duplicate / related-to-existing
 8. **Operator action** — mark reviewed/resolved + thumbs down, persisted
 9. **Failure tests** — duplicates, malformed LLM JSON, timeout, out-of-order, concurrent

@@ -1,15 +1,9 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import { POLL_INTERVAL_MS } from "../lib/config";
-import { db } from "../lib/db/client";
-import { events } from "../lib/db/schema";
 import { logJson } from "../lib/log";
 import { createSleeper } from "../lib/sleep";
-import { claimJob } from "../lib/queue/claimJob";
-import { markFailed } from "../lib/queue/markFailed";
-import { markSucceeded } from "../lib/queue/markSucceeded";
-import { processEvent } from "./processEvent";
+import { runJob } from "./runJob";
 
 let shuttingDown = false;
 const sleeper = createSleeper();
@@ -32,55 +26,14 @@ async function main(): Promise<void> {
 
   while (!shuttingDown) {
     try {
-      const claimed = await claimJob(workerId);
+      // runJob owns claim-to-disposition, including its own retry/DLQ routing.
+      // Anything that escapes it is a loop-machinery fault, not a job failure.
+      const outcome = await runJob(workerId);
 
-      if (!claimed) {
+      // Only sleep when there was nothing to do — after any real disposition,
+      // re-poll immediately and drain the backlog.
+      if (outcome === "idle") {
         await sleeper.sleep(POLL_INTERVAL_MS);
-        continue;
-      }
-
-      // Claiming pushed a crash-looped job past its retry budget. Skip the
-      // handler entirely, and don't sleep — drain any further backlog now.
-      if (claimed.status === "dead_letter") {
-        logJson({
-          msg: "job.dead_lettered_at_claim",
-          event_id: claimed.eventId,
-          attempts: claimed.attempts,
-          max_attempts: claimed.maxAttempts,
-          worker_id: workerId,
-        });
-        continue;
-      }
-
-      logJson({
-        msg: "job.claimed",
-        event_id: claimed.eventId,
-        attempts: claimed.attempts,
-        worker_id: workerId,
-      });
-
-      try {
-        const [event] = await db.select().from(events).where(eq(events.id, claimed.eventId));
-        if (!event) {
-          throw new Error(`event ${claimed.eventId} not found for its job row`);
-        }
-
-        await processEvent(event);
-        await markSucceeded(claimed);
-
-        logJson({ msg: "job.succeeded", event_id: claimed.eventId, worker_id: workerId });
-      } catch (err) {
-        // The expected failure path: the job itself errored. Route it to the
-        // retry/DLQ machinery rather than letting it escape to the outer
-        // catch, which is for loop-machinery faults only.
-        await markFailed(claimed, err);
-        logJson({
-          msg: "job.failed",
-          event_id: claimed.eventId,
-          attempts: claimed.attempts,
-          error: err instanceof Error ? err.message : String(err),
-          worker_id: workerId,
-        });
       }
     } catch (loopErr) {
       // A transient fault in the loop machinery itself (e.g. the DB blipping

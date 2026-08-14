@@ -152,6 +152,23 @@ export const findings = pgTable(
     // LLM-derived structured labels (e.g. ["missing_items"]). Display
     // metadata only — never read by correlation or priority code.
     extractedTags: jsonb("extracted_tags"),
+    // Which evidence the narrative actually rests on, as real event ids. The
+    // model never sees or emits a UUID: it cites opaque labels (E1..En) which
+    // are validated against the set we issued and mapped back here in code, so
+    // a hallucinated citation is detectably invalid rather than plausibly real.
+    //
+    // NULL on fallback rows — deliberately not "all of them", which would give
+    // this column two meanings and make a degraded finding light up every event
+    // as cited. NULL reads as "no citation data"; summary_source carries the
+    // llm-vs-fallback distinction on its own.
+    citedEventIds: jsonb("cited_event_ids"),
+    // Which model wrote this prose. Needed to interpret a bad summary, and to
+    // tell pre- from post-model-change rows apart. NULL on fallback rows.
+    llmModel: text("llm_model"),
+    // When the prose was written, which is not updated_at — correlation touches
+    // that too. The gap between this and last_event_at is how "prose is stale
+    // relative to evidence" becomes visible.
+    enrichedAt: timestamp("enriched_at", { withTimezone: true }),
     eventCount: integer("event_count").notNull().default(0),
     firstEventAt: timestamp("first_event_at", { withTimezone: true }).notNull(),
     lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),

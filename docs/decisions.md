@@ -269,3 +269,86 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Decision:** Added a test that forces the collision deterministically: a competing transaction inserts the open finding and is held open across the correlation attempt, so the blocked insert is guaranteed to raise `23505` when the competitor commits. The test asserts on the emitted `correlation.insert_race_retry` log line, not merely on the final outcome — `attached` is also what a no-race run produces, so the outcome alone cannot distinguish them.
 **Alternatives:** Trusting the naturally-concurrent test (rejected — it was demonstrably passing without exercising the path; a race that "usually doesn't happen" in a test is a race that is untested).
 **Consequence:** Worth generalizing: for any test whose subject is a race, the assertion has to distinguish "the recovery path ran and worked" from "the situation never arose". Slice 9's failure tests should hold to the same standard.
+## 2026-08-14 — Claude Sonnet 5 for enrichment; the boundary is what makes it sufficient
+
+**Context:** Slice 5 needed a model, and the reflexive answer is the most capable one available. But the deterministic layer has already decided everything that carries risk by the time the model runs: which events belong together, how severe the finding is, why it's severe, and what evidence backs it. What's left is two or three sentences of narration and a pick from an eight-item allowlist, using facts handed over as givens.
+**Decision:** `claude-sonnet-5`, at `effort: "low"`, with `max_tokens: 4096`. Recorded here in exactly those terms because the reasoning generalizes past this slice: **the deterministic/LLM boundary is what makes the cheaper model sufficient.** Narration does not need a frontier model. `LLM_TIMEOUT_MS` stays at 15s and `PROCESSING_TIMEOUT_MS` therefore stays at 45s.
+**Alternatives:** An Opus-tier model (rejected — paying roughly 5x per token for prose, while the README's own traffic-spike answer argues for cost discipline under load; picking the expensive model here would contradict it). A local or cheaper non-Claude model (rejected — out of scope, and the fallback provider already covers the "no model at all" case).
+**Consequence:** If summary quality turns out to be the weak point, the model id is a one-line change in `llm/anthropic.ts` and the provider interface absorbs it. The claim being made is not "Sonnet is good enough at everything" — it is "this task was made small enough that it doesn't need more."
+
+## 2026-08-14 — Structured outputs, with the JSON Schema derived from the Zod schema
+
+**Context:** The model's output has to be machine-checkable — an allowlist of actions, a tag enum, a citation list. Two mechanisms were available: constrain generation with a tool definition, or constrain it with `output_config.format`.
+**Decision:** `output_config.format` with a `json_schema`, where the schema is generated from the same Zod object that validates the response on the way back (`z.toJSONSchema`, `$schema` stripped). One definition, used at both ends.
+**Alternatives:** A tool definition with `strict: true` (rejected — it models "call this function" for something that is not a function call, and the response then has to be dug out of a `tool_use` block). Two hand-maintained definitions, one for the API and one for validation (rejected — they drift, and the drift is silent).
+**Consequence:** Structured outputs reject `minLength`/`maxLength`/`minItems`, so the Zod schema deliberately carries no length constraints; bounds are clamped in code after parsing. That constraint is invisible in the source and would fail as a 400 on every enrichment, so a unit test asserts the emitted schema contains only supported keywords. Objects are `z.strictObject`, so `additionalProperties: false` reaches the API too — an injected extra key is refused at both ends.
+
+## 2026-08-14 — findings.version is the enrichment fence; enrichment never bumps it
+
+**Context:** Enrichment runs outside correlation's transaction and holds no row lock, because it makes a network call. So while one worker waits on the model, another can attach new evidence to the same finding and enrich it too. The loser of that race must not overwrite fresher prose with a summary describing a smaller evidence set.
+**Decision:** Both of enrichment's writes — the `processing` claim and the `ready` result — are guarded on the version observed when correlation committed: `WHERE id = $1 AND version = $2`. Zero rows updated means superseded: log `enrichment.superseded` and discard, with no retry. Enrichment itself never writes `version`, so it stays correlation-owned.
+**Alternatives:** A row lock held across the LLM call (rejected — pins a database connection for up to 15s per in-flight job, which is exactly what the immediate-commit claim design was built to avoid). A dedicated `enrichment_version` column (rejected — a second counter to keep in step with the first, for no additional guarantee). Last-write-wins (rejected — it is silently wrong in the one case the fence exists for).
+**Consequence:** Enrichment not bumping `version` is what makes `version` usable as a fence at all — the same shape as `claim_token` in slice 3. It also means "new evidence arrived, so the finding went back to `processing`" falls out of the existing design rather than being bolted on for slice 6's live dashboard.
+
+## 2026-08-14 — Opaque evidence labels, and one regeneration before falling back
+
+**Context:** CLAUDE.md requires that any claim in a summary map to an event already in the evidence set. Stated that way it is an aspiration; nothing in the code could check it.
+**Decision:** Evidence reaches the prompt as positional opaque labels (`E1..En`) — never event UUIDs. The model returns `cited_labels`, which is validated as a subset of the labels actually issued, then mapped back to real event ids in code and persisted to `findings.cited_event_ids`. **A label outside the issued set is a validation failure of the whole response, not a field to drop:** one regeneration with the rejection reason, then the deterministic fallback.
+**Alternatives:** Passing real event ids and validating those (rejected — a hallucinated UUID could coincidentally name a real row, and it leaks internal identifiers into a prompt that also contains untrusted text). Dropping the bad label and keeping the response (rejected, and this is the substantive point: the sentence that citation was supporting stays standing with nothing underneath it, which is precisely the unsupported conclusion the rule exists to prevent).
+**Consequence:** "Claims map to evidence" is now enforced and testable rather than asserted. Rejecting rather than repairing costs an occasional extra call and an occasional degraded summary — the right trade, since the degraded summary is honest and the repaired one would not be.
+
+## 2026-08-14 — Fallback rows write cited_event_ids = NULL, not every event
+
+**Context:** The deterministic fallback writer has no basis for choosing which evidence its summary rests on — it restates all of it. The obvious shortcut is to cite every label.
+**Decision:** `cited_event_ids` is `NULL` on fallback rows. `summary_source` already carries the llm-vs-fallback distinction.
+**Alternatives:** Citing every label (rejected — it gives one column two meanings, "the model selected these" on LLM rows and "all of them" here, and slice 6 highlighting citations would light up every event on a degraded finding: noise presented as signal). An empty array (rejected — that reads as "cited nothing despite being able to", which is a different and worse claim).
+**Consequence:** `NULL` reads as "no citation data available". The grounding invariant is unweakened: a citation, when present, was validated.
+
+## 2026-08-14 — The SDK's own retries are disabled so the attempt budget stays true
+
+**Context:** `PROCESSING_TIMEOUT_MS` is derived in `config.ts` as `LLM_TIMEOUT_MS * MAX_LLM_ATTEMPTS + margin`, so that a slow-but-alive worker is never reclaimed mid-flight. The Anthropic SDK retries twice by default.
+**Decision:** The client is constructed with `maxRetries: 0`. The provider's own bounded loop is the only retry.
+**Alternatives:** Leaving the SDK default and widening `PROCESSING_TIMEOUT_MS` to match (rejected — it makes the stale-reclaim window depend on a third-party default that can change under us, and the arithmetic in `config.ts` would no longer describe the code).
+**Consequence:** Left alone, the real worst case would have been 6 HTTP calls against a timeout computed from 2 — a slow worker would have had its job stolen and burned a retry it never earned. A unit test asserts the constructor argument, because this is the kind of thing a future refactor silently reverts.
+
+## 2026-08-14 — 'failed' is reachable only via a dead-lettered job, plus a documented trigger to pull it
+
+**Context:** Slice 5 owns `accepted -> processing -> ready | failed`. But an LLM outage is deliberately not a job failure, and correlation rarely fails — so in normal operation nothing ever reaches `failed`. The brief requires a failed job be clearly visible; a status the demo cannot produce is decorative.
+**Decision:** Two parts. First, `findings.status = 'failed'` is written in exactly one place: when a job dead-letters, the worker looks up the event's finding and marks it failed (a no-op if correlation never committed, since then no finding row exists). Second, a deterministic trigger — an `event_id` prefixed `force_fail_` makes `processEvent` throw *after* correlation commits — gated on `ENABLE_DEMO_FAILURE_TRIGGER`, default off in code and on in `.env.example`.
+**Alternatives:** Treating LLM failure as job failure so `failed` occurs naturally (rejected — it contradicts the whole degradation design and would DLQ findings that are perfectly usable). Leaving `failed` unreachable and describing it in the README (rejected — an untriggerable state in a UI is a claim, not a feature). Hiding the trigger behind an undocumented name (rejected — a reviewer finding a concealed backdoor is worse than one finding a labelled test hook).
+**Consequence:** The failure branch is demonstrable end to end: the finding is created with real evidence and priority, the job walks the real 1s/2s/4s/8s ladder into the DLQ, and the finding flips to `failed` with its evidence intact and only its prose missing. Reaching it takes ~15s of real backoff, which is the honest cost of not faking the state. Verified by hand as well as in tests.
+
+## 2026-08-14 — Recommended actions are a separate taxonomy from operator_actions.action_type
+
+**Context:** `operator_actions.action_type` already exists (`mark_reviewed`, `mark_resolved`, `thumbs_up`, `thumbs_down`), and the model's recommended actions also needed a closed allowlist. Sharing the enum would have meant one taxonomy and no new constant.
+**Decision:** A separate eight-verb operator vocabulary (`contact_customer`, `issue_refund`, `comp_next_order`, `escalate_to_manager`, `check_kitchen_capacity`, `review_courier_assignment`, `audit_order_accuracy`, `no_action_needed`).
+**Alternatives:** Reusing `operator_actions.action_type` (rejected — the two share the word "action" and nothing else. One is what an operator does *to a finding* in the dashboard; the other is what they do *about the problem*. Merging them makes recommendations circular: "we recommend you mark this reviewed" is not advice, and the brief's own examples are operational verbs).
+**Consequence:** Two enums that look similar and must not be merged, which is why both carry comments saying so. `extracted_tags` is a third closed vocabulary for the same reason — it is a finer-grained read of free text, distinct from `issue_class`, which is derived from structured fields only and drives correlation.
+
+## 2026-08-14 — Enrichment reads evidence separately so correlation stays free-text-blind
+
+**Context:** `correlation/evidence.ts` deliberately drops `payload` from its result. Enrichment needs `complaint_text` and `review_text`, and widening that reader was the smaller diff.
+**Decision:** A separate read, `llm/enrichmentInput.ts`, over the same join — keeping `payload` and adding the opaque labels.
+**Alternatives:** Widening `fetchEvidence` and letting correlation ignore the extra fields (rejected — the invariant is about what kind of input is *available* to the deterministic path, not merely what it currently reads. `deriveIssueClass.ts` already carries this argument: a "helpful" keyword classifier on free text would violate invariant 1 without touching `src/lib/llm/` at all. Once the field is in the struct, the next change that reads it looks harmless).
+**Consequence:** Two readers over one join — deliberate duplication, and the same reasoning that puts `correlation/` and `llm/` in separate folders. The cost is a second query per enrichment.
+
+## 2026-08-14 — Zod-validated environment, parsed once at startup
+
+**Context:** CLAUDE.md called for Zod at every boundary including env vars, and four files were each hand-rolling `if (!process.env.X) throw`. With slice 5 adding `LLM_PROVIDER` and a conditionally-required `ANTHROPIC_API_KEY`, a missing key would have surfaced as a 401 mid-job rather than as a startup failure.
+**Decision:** `src/lib/env.ts` parses `process.env` once, with `superRefine` making `ANTHROPIC_API_KEY` required exactly when `LLM_PROVIDER=anthropic`. `db/client.ts` and `db/migrate.ts` now read from it. `drizzle.config.ts` and `tests/setup.integration.ts` keep their own checks — they load outside the app.
+**Alternatives:** Per-consumer checks (rejected — that was the status quo, and it cannot express a conditional requirement between two variables).
+**Consequence:** Empty values in `.env.example` (`ANTHROPIC_API_KEY=`) arrive as `""` rather than undefined, so the parser maps blanks to undefined first — without that, copying the example file and running the default fallback provider would fail validation on a key that is legitimately absent. The example file's UTF-8 BOM was removed at the same time; copied to `.env` it made the first key parse as a mangled `DATABASE_URL`.
+
+## 2026-08-14 — Prompt injection is defended in depth and tested at three layers
+
+**Context:** Customer-authored text is the one untrusted input in the system, and both carriers (`complaint_text`, `review_text`) are unbounded strings. "We fence the text and validate the output" is easy to write in a README and hard to substantiate.
+**Decision:** Three layers, each separately tested, against one shared hostile fixture that carries an instruction override, an out-of-allowlist action demand, a forged closing fence token, and a fabricated citation label. (1) **Prompt containment:** text is fenced in `<customer_text>`, fence tokens in the payload are neutralized case- and whitespace-insensitively *before* truncation, and no event or finding id ever enters the prompt. (2) **Validator containment:** `parseEnrichment` is fed responses in which the model *did* obey, and every one must be rejected. (3) **End to end:** the hostile event goes through the real pipeline and the shape of what lands in the database is asserted unchanged. A fourth check runs the real model and is skipped without an API key.
+**Alternatives:** Testing only that the model behaves (rejected — it is the one layer that cannot be asserted deterministically, and a green suite would depend on a network call and a model's mood). Testing only the validator (rejected — it proves nothing about what reached the prompt).
+**Consequence:** The framing worth keeping: *"the model didn't obey"* and *"obedience is survivable"* are different claims, and layer 2 exists because only the second can be guaranteed. Sanitizing happens at the prompt boundary, not on ingestion — `events` is immutable and an operator should see what the customer actually wrote. A live run also showed the model *narrating* that it had ignored an injected instruction, which is noise for an operator; the system prompt now tells it not to mention prompt handling at all.
+
+## 2026-08-14 — The worker loop body extracted so the failure path is tested as it ships
+
+**Context:** The dead-letter path needed an integration test, and the logic lived inline in `worker/index.ts`'s `while` loop — reachable only by running the real process with real backoff.
+**Decision:** Extracted `runJob(workerId, provider?)` into `worker/runJob.ts`, returning `idle | succeeded | failed | dead_lettered`. `index.ts` keeps the looping, sleeping, and shutdown handling.
+**Alternatives:** Re-implementing claim -> process -> dispose inside the test (rejected — the test would then assert against a copy of the logic and stay green if the real loop broke). Running the worker as a subprocess (rejected — 15s of real backoff per test, and disposition assertions become log-scraping).
+**Consequence:** The test drives the same function the worker does, pulling `next_attempt_at` forward between iterations rather than waiting out the ladder. The backoff arithmetic stays unit-tested where it already was.

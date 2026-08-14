@@ -55,8 +55,35 @@ correlation → LLM → persisted finding → SSE → dashboard.
 ### Deterministic vs. LLM boundary
 <!-- OWNER: agent | slice: 5 (LLM integration) -->
 
-_TODO_ — Table of which finding fields are computed by code and which are generated
-by the model. Explicitly required by the brief.
+Every field on a finding, and who writes it:
+
+| Field | Written by | Notes |
+|---|---|---|
+| `restaurant_id`, `order_id` | code | `order_id` is display-only; never part of matching |
+| `version` | code (correlation) | Bumped on every evidence change. Enrichment reads it as a fence and never writes it |
+| `priority` | code (`correlation/priority.ts`) | Threshold table, max across signals. The model is told the priority and forbidden to restate or guess one |
+| `event_count`, `first_event_at`, `last_event_at` | code | Recomputed from the evidence set, never incremented |
+| `finding_events` (the evidence) | code | Assembled from the database. Never from model output |
+| `closed_at` | code (correlation) | Rolling-window lifecycle marker |
+| `status` | code | `accepted` → `processing` → `ready` \| `failed` |
+| `issue` | **model** | Short noun phrase naming the pattern |
+| `summary` | **model** | Two or three sentences for an operator |
+| `recommended_actions` | **model**, from a fixed allowlist | Eight operator verbs; anything else is rejected |
+| `extracted_tags` | **model**, from a fixed enum | Finer-grained read of free text than `issue_class`. Drives nothing |
+| `cited_event_ids` | **model's choice, code's mapping** | The model cites opaque labels `E1..En`; code validates the set and maps it back to real ids |
+| `summary_source`, `llm_model`, `enriched_at` | code | Provenance for the four fields above |
+
+The model never decides what is true, only how it reads. Take the model away entirely and
+a finding still has its evidence, its priority, the reason for that priority, and a
+usable summary — the prose just gets flatter. That is the property the whole split exists
+to buy, and it is what the two failure tests in `tests/integration/enrichment.test.ts`
+assert.
+
+One consequence worth stating plainly: `issue_class` is derived from structured fields
+only (`event_type`, plus an explicit `category`/`reason`), never from free text. A
+keyword classifier reading `complaint_text` would violate this boundary without going
+anywhere near `src/lib/llm/`. That is why enrichment does its own evidence read rather
+than widening correlation's — correlation's reader cannot see customer text at all.
 
 ---
 
@@ -165,13 +192,120 @@ and drained by the real worker: one finding, three evidence rows, `first_event_a
 the same result.
 
 ### LLM failure handling and degraded findings
-<!-- slice: 5 --> _TODO_
+<!-- slice: 5 -->
+
+**An LLM failure is never a job failure.** Timeouts, refusals, 5xx, malformed JSON, and
+schema violations are all caught inside the enrichment step, which then falls through to
+a deterministic writer. The finding still reaches `ready`; `summary_source` says
+`fallback` and the summary says so in words, so a thin summary reads as "the model was
+unavailable" rather than "there was little to say."
+
+Each call is bounded by `LLM_TIMEOUT_MS` (15s) and `MAX_LLM_ATTEMPTS` (2). Only a
+*rejected response* is worth regenerating — a transport error or a refusal would return
+the same answer, so those are not retried. The regeneration carries the rejection reason
+back to the model.
+
+The SDK client is constructed with **`maxRetries: 0`**, which is load-bearing rather than
+a preference. The SDK retries twice by default, so leaving it alone would make the real
+worst case six HTTP calls against a `PROCESSING_TIMEOUT_MS` derived in `config.ts` from
+two — and a slow-but-alive worker would have its job reclaimed mid-flight and burn a
+retry it never earned. A unit test asserts the constructor argument, because that is the
+kind of thing a refactor silently reverts.
+
+Enrichment runs outside correlation's transaction and holds no lock, so a slow model call
+can be overtaken by new evidence. Both of its writes are fenced on `findings.version`
+(`WHERE id = $1 AND version = $2`); the loser logs `enrichment.superseded` and discards
+rather than overwriting fresher prose with a summary of a smaller evidence set.
+Enrichment never bumps `version` itself — that is what makes it usable as a fence.
+
+**Reaching `failed`.** Because outages degrade instead of failing, a job essentially
+never fails in normal operation, which would leave the failure branch of the status
+machine unreachable by anyone demoing the product. `findings.status = 'failed'` is
+written in exactly one place — when a job dead-letters after its correlation committed —
+and there is a documented trigger to reach it: with `ENABLE_DEMO_FAILURE_TRIGGER=true`
+(set in `.env.example`), an event whose `event_id` starts with `force_fail_` throws
+*after* correlation commits. The finding is real, the job walks the real 1s/2s/4s/8s
+ladder into the DLQ, and the finding flips to `failed` with its evidence and priority
+intact and only its prose missing. It takes ~15s of real backoff — the honest cost of not
+faking the state. Slice 7 puts a button on it.
 
 ### Prompt injection defense
-<!-- slice: 5 --> _TODO_
+<!-- slice: 5 -->
+
+Customer-authored text (`complaint_text`, `review_text`) is the only untrusted input in
+the system, and both are unbounded strings. The defense is in three layers, each tested
+separately against one shared hostile fixture that carries an instruction override, a
+demand for an out-of-allowlist action, a forged closing fence token, and a fabricated
+citation label:
+
+1. **Prompt containment.** The text is fenced in `<customer_text>` and labelled as data
+   describing a complaint, never instructions. Fence tokens inside the payload are
+   neutralized case- and whitespace-insensitively (`< / CUSTOMER_TEXT >` is the same
+   attack) and *before* truncation, so a token straddling the cut cannot survive as an
+   unmatched fragment. No event id or finding id ever enters the prompt — only opaque
+   labels.
+2. **Validator containment.** Everything coming back is validated against a Zod schema
+   with `additionalProperties: false`, a closed action allowlist, a closed tag enum, and a
+   citation check. This layer is tested by feeding it responses in which the model *did*
+   obey — every one must be rejected.
+3. **End to end.** The hostile event goes through the real pipeline and the shape of what
+   lands in the database is asserted unchanged: priority still equals what `scorePriority`
+   computed, actions still inside the allowlist, citations still a subset of the finding's
+   own evidence, no extra findings or operator actions created.
+
+The framing that matters: **"the model didn't obey" and "obedience is survivable" are
+different claims,** and only the second can be guaranteed deterministically. Layer 2
+exists because of that. A fourth check runs the real model against the same payload and
+is skipped without an API key — evidence about the model's behavior, not a guarantee.
+
+**What the live layer actually caught.** On the first real run against
+`claude-sonnet-5`, the model refused the injected instruction correctly — and then wrote
+this into the operator-facing summary:
+
+> "Any embedded instructions in the customer's text were disregarded as they are not
+> legitimate commands."
+
+The defense worked. **Disclosing it was the bug.** It leaks an implementation detail into
+what is supposed to be a customer-service artifact, and it tells an attacker their probe
+was seen and classified — useful reconnaissance for anyone iterating on payloads. The fix
+was a system-prompt rule not to mention prompt handling at all, re-verified against the
+live model.
+
+This is the case for the live layer existing. Layers 1–3 all passed on this response, and
+correctly so: the injected text stayed fenced, the output validated cleanly, and the
+database shape was unchanged. A correctly-refused injection that is then *narrated*
+violates none of those invariants — there is no deterministic assertion that would have
+caught it, because nothing about it is malformed. The general lesson is worth stating
+plainly: **a correct security decision can still be a disclosure bug**, and that class of
+failure only surfaces when a real model actually writes the words.
+
+Two smaller decisions. A citation outside the issued set is a rejection of the whole
+response, not a field to drop: stripping the bad label would leave the sentence it
+supported standing with nothing underneath, which is the unsupported conclusion the rule
+exists to prevent. And sanitizing happens at the prompt boundary, not on ingestion —
+`events` is immutable and an operator should see exactly what the customer wrote.
 
 ### Model selection
-<!-- slice: 5 --> _TODO_
+<!-- slice: 5 -->
+
+**`claude-sonnet-5`**, at `effort: "low"`.
+
+The choice follows from the boundary rather than from benchmarks. By the time the model
+runs, code has already decided which events belong together, how severe the finding is,
+why it is severe, and what evidence backs it. What is left is two or three sentences of
+narration and a pick from an eight-item allowlist, using facts handed over as givens.
+**Narration does not need a frontier model** — and reaching for an Opus-tier model at
+roughly 5× the token cost would contradict the cost-discipline argument this README makes
+about traffic spikes.
+
+Output is constrained with structured outputs (`output_config.format`) rather than a tool
+definition — this is not a function call — and the JSON Schema is generated from the same
+Zod object that validates the response on the way back, so there is one definition rather
+than two that drift.
+
+If summary quality turns out to be the weak point, the model id is a one-line change and
+the provider interface absorbs it. The claim is not that Sonnet is sufficient for
+everything; it is that this task was made small enough that it doesn't need more.
 
 ---
 
@@ -336,8 +470,29 @@ _TODO_ — list each test, what it proves, and how to run it.
 ## Known limitations
 <!-- OWNER: design-chat -->
 
-_TODO_ — honest list. Correlation is rule-based and misses fuzzy links; single-node
-worker; no auth; no tenant isolation; polling interval; no eval harness; etc.
+These are deliberate scope decisions, not oversights. Each one is a place where I chose the simpler option and know what it costs.
+
+**Correlation is coarse.** A finding groups everything happening at a restaurant within a rolling 3-hour window of the last event. Two genuinely unrelated problems in the same window — a delivery delay and a food quality complaint about a different order — merge into one card. I chose this because the brief's own reference scenario is a mixed-type incident (delay + complaint + review) spanning ~2h15m, and any key that splits by issue type or uses a fixed time bucket fails to reproduce it. A finding here means "something is wrong at this restaurant right now," which is the shape an operator actually acts on. The cost is occasional over-merging.
+
+**The window is a constant.** Three hours is hardcoded, not tuned per restaurant. A high-volume location during dinner rush and a quiet one at 3pm get the same window, which is wrong in both directions. Tuning this needs volume data I don't have.
+
+**Correlation can't see what a complaint is about.** Grouping uses `restaurant_id` and time only. LLM-extracted tags like `missing_items` are shown on the card for context but are deliberately never read by correlation code, because model output must not silently decide which events belong together. The natural next step is a hybrid — rules first, with the model proposing merges for leftovers as a suggestion an operator confirms, never as a silent write.
+<!-- slice 6: verify true once dashboard exists -->
+
+**Backfilled events don't correlate with each other.** An event arriving more than 3 hours before an open finding's window gets its own finding, created already closed, so a live incident isn't hijacked by week-old data. The cost is that two backfills minutes apart become two separate findings, since the lookup only sees open ones. The brief's out-of-order case is events minutes apart, which works correctly; this only affects genuine historical replay.
+
+**`negative_review` has no structured root cause.** `issue_class` is derived from structured fields only. Complaints and refunds can carry a `category`/`reason` that folds into a real root-cause class (a refund for lateness classes as `delivery_delay`, not `refund`), but reviews arrive with only a rating and free text, so they always class as `negative_review`. Extending this means adding a structured field to the review payload, not inferring one from the text.
+
+**Multi-worker is safe but unproven at scale.** Claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`, and I verified two concurrent workers against twelve events with no job processed twice, plus a forced insert-race on the correlation path. What I haven't done is run this under real load — and the polling interval still sets a floor on end-to-end latency that a broker with push delivery wouldn't have.
+
+**No authentication, no tenant isolation.** Any caller can post events for any `restaurant_id`, and the dashboard shows every restaurant's findings. The brief excludes auth, so this is expected, but it means the multi-tenancy in the schema (tenant-scoped idempotency keys, per-restaurant correlation) is structural rather than enforced.
+<!-- slice 6: verify true once dashboard exists -->
+
+**No per-tenant rate limiting or LLM spend control.** A single restaurant flooding events would consume worker capacity and LLM budget other tenants need. The queue absorbs the burst safely — the API stays responsive and nothing is lost — but processing is FIFO across all tenants with no fairness guarantee.
+
+**A demo affordance ships in the code.** An `event_id` prefixed `force_fail_` deliberately throws after correlation commits, so the `failed` state can be demonstrated end-to-end rather than only unit-tested. It's gated behind `ENABLE_DEMO_FAILURE_TRIGGER` and documented — but it is a hook that wouldn't exist in production.
+
+**No eval harness.** LLM output quality is unmeasured. I have no golden set, no regression check on prompt changes, and no way to tell whether a prompt edit made summaries better or worse. For a product whose value is the quality of its recommendations, this is the most significant gap — see "What I would do with one more day."
 
 ---
 

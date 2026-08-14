@@ -43,6 +43,13 @@
       "when": 1786734424545,
       "tag": "0005_abnormal_gravity",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786739381177,
+      "tag": "0006_oval_boomer",
+      "breakpoints": true
     }
   ]
 }

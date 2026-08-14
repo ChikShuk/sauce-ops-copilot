@@ -8,8 +8,15 @@ import type { ClaimedJob } from "./claimJob";
 // schedule; budget spent -> 'dead_letter', and next_attempt_at stops moving
 // so the row is plainly terminal rather than merely scheduled far out.
 //
+// Returns the status the row landed in, or null when the write was superseded.
+// The caller needs to know whether this attempt actually dead-lettered: that is
+// the one thing that puts a finding into 'failed'.
+//
 // Same claim_token fencing as markSucceeded — see the comment there.
-export async function markFailed(job: ClaimedJob, err: unknown): Promise<void> {
+export async function markFailed(
+  job: ClaimedJob,
+  err: unknown,
+): Promise<"failed" | "dead_letter" | null> {
   const message = err instanceof Error ? err.message : String(err);
   const nextAttemptAt = computeNextAttemptAt(job.attempts);
 
@@ -34,5 +41,8 @@ export async function markFailed(job: ClaimedJob, err: unknown): Promise<void> {
       event_id: job.eventId,
       claim_token: job.claimToken,
     });
+    return null;
   }
+
+  return result[0].status as "failed" | "dead_letter";
 }

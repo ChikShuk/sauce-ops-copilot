@@ -18,6 +18,7 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "drizzle-orm": "^0.45.2",
     "next": "16.3.0",
     "postgres": "^3.4.9",
