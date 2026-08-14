@@ -1,36 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { correlateEvent } from "../../src/lib/correlation/correlateEvent";
+import { deriveIssueClass } from "../../src/lib/events/deriveIssueClass";
+import type { IngestEventInput } from "../../src/lib/events/schema";
+import { REFERENCE_SCENARIO } from "../../src/lib/simulator/presets";
 import { evidenceFor, findingsFor } from "../helpers/db";
 import { newRestaurantId, seedEvent } from "../helpers/factories";
 
 // The brief's own worked example. If this doesn't reproduce, the design is
 // wrong regardless of how clean the code is.
-const REFERENCE = [
-  {
-    label: "delivery_delay 17:55",
-    occurredAt: new Date("2026-08-14T17:55:00Z"),
-    eventType: "delivery_delay",
-    issueClass: "delivery_delay",
-    payload: { delay_minutes: 35 },
-    orderId: "order_5001",
-  },
-  {
-    label: "complaint 18:12",
-    occurredAt: new Date("2026-08-14T18:12:00Z"),
-    eventType: "complaint",
-    issueClass: "missing_items",
-    payload: { complaint_text: "fries were missing", category: "missing_items" },
-    orderId: "order_5001",
-  },
-  {
-    label: "negative_review 20:10",
-    occurredAt: new Date("2026-08-14T20:10:00Z"),
-    eventType: "negative_review",
-    issueClass: "negative_review",
-    payload: { rating: 2, review_text: "slow and wrong" },
-    orderId: null,
-  },
-] as const;
+//
+// The payloads and their spacing come from src/lib/simulator/presets.ts, which
+// is also what the simulator's reference button posts — so the demo a reviewer
+// clicks and the fixture this test proves cannot drift apart. The simulator
+// anchors those offsets to `now`; this anchors them to a fixed date so the
+// first/last_event_at assertions below can stay exact.
+const ANCHOR = new Date("2026-08-14T20:10:00Z");
+
+const REFERENCE = REFERENCE_SCENARIO.map((spec) => ({
+  label: spec.label,
+  occurredAt: new Date(ANCHOR.getTime() - spec.minutesBefore * 60_000),
+  eventType: spec.eventType,
+  // Derived rather than restated: issue_class is production's job, and hardcoding
+  // it here would let the taxonomy change without this test noticing.
+  issueClass: deriveIssueClass({
+    event_type: spec.eventType,
+    payload: spec.payload,
+  } as IngestEventInput),
+  payload: spec.payload,
+  orderId: spec.orderId,
+}));
 
 // All 6 arrival orders must converge on the same finding.
 function permutations<T>(items: readonly T[]): T[][] {

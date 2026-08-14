@@ -1,4 +1,5 @@
 import { FindingsBoard } from "./components/FindingsBoard";
+import { env } from "@/lib/env";
 import { currentBoard } from "@/lib/realtime/broadcaster";
 
 // Server-rendered first paint, then the client takes over the same data via
@@ -22,7 +23,19 @@ export default async function Home() {
         </p>
       </header>
 
-      <FindingsBoard initialFindings={findings} initialQueue={queue} />
+      {/*
+        Read here, in a Server Component, because the flag is server-side env.
+        Worth being precise about what it means: this is what the *web app's*
+        environment says, and the process that actually acts on `force_fail_` is
+        the worker. They are separate processes that happen to share one .env
+        under Docker Compose, so the button's presence is a strong hint rather
+        than a guarantee.
+      */}
+      <FindingsBoard
+        initialFindings={findings}
+        initialQueue={queue}
+        demoFailureEnabled={env.ENABLE_DEMO_FAILURE_TRIGGER}
+      />
     </div>
   );
 }

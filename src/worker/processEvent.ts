@@ -1,4 +1,5 @@
 import type { InferSelectModel } from "drizzle-orm";
+import { FORCE_FAIL_PREFIX } from "../lib/config";
 import { correlateEvent } from "../lib/correlation/correlateEvent";
 import type { events } from "../lib/db/schema";
 import { env } from "../lib/env";
@@ -9,7 +10,10 @@ import { logJson } from "../lib/log";
 
 export type EventRow = InferSelectModel<typeof events>;
 
-export const FORCE_FAIL_PREFIX = "force_fail_";
+// Re-exported so the existing tests and the worker keep one import site for it,
+// while the constant itself lives in config.ts where a client component can
+// reach it without dragging the database along.
+export { FORCE_FAIL_PREFIX };
 
 // Correlation and priority are deterministic; enrichment hangs off the returned
 // outcome. "created"/"attached"/"replaced" mean the finding's evidence changed

@@ -436,9 +436,14 @@ first. Duplicate findings can't arise from this path either, since a duplicate e
 never reaches `event_jobs` at all — there's nothing left for a worker or correlation
 step to double-process. Worker-side redelivery safety landed in slice 3 (the claim
 statement transitions the row it claims, and correlation carries its own redelivery
-guard). The response's `duplicate` boolean and `id` are what the slice-7 simulator will
-surface in the UI; the dashboard itself has nothing to show for a duplicate, because a
-duplicate correctly produces no new finding and no new evidence.
+guard).
+
+**What the UI shows.** The simulator's *Duplicate event* button posts one body twice on a
+single click and logs both outcomes — `201 Accepted`, then `200 Duplicate, recognized as a
+duplicate of <id> — no second event row, no second job, no new finding`. Saying what did
+*not* happen is the point: the board deliberately does not change, and without the log line
+that is indistinguishable from a button that did nothing. The `id` in the second response is
+the original row's, so the collision is nameable rather than merely asserted.
 
 ### Out-of-order events
 <!-- OWNER: agent | slice: 4 -->

@@ -3,27 +3,13 @@
 // compose up`, and the other is half the viewport until a card is clicked.
 // A blank region in either reads as a broken build rather than as an empty one.
 
-const SAMPLE_CURL = `curl -X POST http://localhost:3000/api/restaurants/bellas_pizza/events \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "event_id": "evt_1",
-    "event_type": "delivery_delay",
-    "order_id": "1042",
-    "occurred_at": "<an ISO timestamp within the last 7 days>",
-    "payload": { "delay_minutes": 95 }
-  }'`;
-
 /**
  * Shown when the board has no findings at all.
  *
  * A reviewer who starts the container before reading the README should be able
  * to work out what this product is from this screen alone — so it leads with
- * what the dashboard is for, then says it is live, then gives them a way to put
- * something on it.
- *
- * Slice 7 replaces the curl block with the event simulator's buttons. When that
- * lands, this text is the thing to update rather than leave as a stale
- * instruction next to a working button.
+ * what the dashboard is for, then says it is live, then points at the simulator
+ * panel above, which opens by default precisely because of this screen.
  */
 export function EmptyBoard() {
   return (
@@ -42,16 +28,17 @@ export function EmptyBoard() {
           three-hour window become one finding.
         </p>
 
-        <p className="mt-5 text-xs font-semibold uppercase tracking-wider text-ink-subtle">
-          Post an event
+        <p className="mt-5 text-sm leading-relaxed text-ink-muted">
+          Use <span className="font-medium text-ink">Simulate events</span> above to post
+          some. <span className="font-medium text-ink">Reference scenario</span> runs the
+          assignment&apos;s own worked example — a delay, a complaint, and a bad review that
+          correlate into a single finding.
         </p>
-        <pre className="mt-2 overflow-x-auto rounded border border-line bg-surface p-3 font-mono text-xs leading-relaxed text-ink-muted">
-          {SAMPLE_CURL}
-        </pre>
 
         <p className="mt-2 text-xs text-ink-subtle">
-          Needs the worker running (<code className="font-mono">npm run worker</code>) — the
-          API accepts and queues the event, the worker correlates it.
+          Events are accepted and queued by the API; the worker correlates and summarizes
+          them, so it needs to be running (<code className="font-mono">npm run worker</code>,
+          or the <code className="font-mono">worker</code> service under Docker Compose).
         </p>
       </div>
     </div>

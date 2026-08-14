@@ -445,3 +445,38 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Consequence:** Four real failures, not zero. `--ink-subtle` — the most used token in the app, carrying every timestamp and label — sat at 4.4:1 on light surface and 3.7:1 on dark, and the medium priority rail at 2.9:1 on light. Both neutral scales moved a step and the medium rail went yellow rather than a darker orange so it stays separable from `high` beside it in the list. The four status states remain distinguishable by glyph, label and hue together, so a palette swap can change how legible they are but cannot collapse the distinction between them.
 
 **Open, not resolved:** the light palette has been measured but never seen — no visual verification of the rendered result — and some copy still reads poorly. Both are carried into slice 10's checklist.
+
+## 2026-08-14 — The simulator's fixtures live in src/, so the demo can't drift from the tests
+
+**Context:** The injection payload lived in `tests/helpers/factories.ts` and the reference scenario as three literal payloads inside `correlation.reference.test.ts`. The simulator needed both, and copying them would have created two sources of truth for the two things a reviewer is most likely to click.
+**Decision:** Both move to `src/lib/simulator/presets.ts`. The reference fixture becomes offsets (135/118/0 minutes) rather than absolute dates, so the simulator anchors them to `now` while the test anchors them to a fixed date and keeps its exact `first_event_at`/`last_event_at` assertions. `tests/helpers/factories.ts` re-exports the injection text so existing imports don't churn.
+**Alternatives:** Duplicating the payloads in the simulator (rejected — the demo would be free to drift from what the tests prove, and the drift would be invisible until a reviewer noticed the button doing something the README says it doesn't).
+**Consequence:** The button posts the exact bytes the tests assert on. The reference test derives `issue_class` through the real `deriveIssueClass` instead of restating it, so a taxonomy change can't pass unnoticed. All six permutations still pass unchanged, which is the check on the refactor.
+
+## 2026-08-14 — Presets are pure values, validated against the endpoint's own schema
+
+**Context:** A simulator button that posts a body the API rejects is worse than no button, and it fails in front of the reviewer rather than in CI.
+**Decision:** `presets.ts` holds no React and no `fetch` — every preset is a pure builder returning `{ restaurantId, body }`, and the unit test parses each one with `ingestEventSchema`, the same schema guarding the route.
+**Alternatives:** A browser test harness (rejected — it adds a dependency to check something that is really a data-shape question). Trusting the types (rejected — `occurred_at` bounds and the discriminated payload union are runtime refinements TypeScript does not see).
+**Consequence:** 22 unit tests covering every button, including that generated `occurred_at` values stay inside the ±bounds and that the reference span stays under `CORRELATION_WINDOW_MS` — the two ways a preset can be type-correct and still be rejected or fail to correlate.
+
+## 2026-08-14 — The two reference buttons must target different restaurants
+
+**Context:** Shipping both a chronological and an out-of-order reference button is only a demonstration if the reviewer can compare the results.
+**Decision:** Each targets its own restaurant (`bellas_pizza`, `bellas_pizza_ooo`), and repeat clicks take an incrementing suffix.
+**Alternatives:** Both posting to one restaurant (rejected, and this is the trap: correlation allows one open finding per restaurant, so the second run would merge into the first and produce a single six-event finding. The demonstration would silently contradict itself — the two orders would appear *not* to converge because there would be nothing to compare).
+**Consequence:** Two cards side by side with identical event counts, window spans and priorities. Verified end to end through the real endpoint: both produce three events over a 135-minute span at `high`.
+
+## 2026-08-14 — FORCE_FAIL_PREFIX moves to config.ts to keep the database out of the browser
+
+**Context:** The simulator's forced-failure button needs the same prefix the worker matches on, and importing it from `worker/processEvent.ts` would have pulled `correlateEvent`, Drizzle and the connection pool into the client bundle.
+**Decision:** The constant lives in `src/lib/config.ts`, which imports nothing. `processEvent.ts` re-exports it so the worker and the existing tests keep one import site.
+**Alternatives:** Retyping the string in the simulator (rejected — a change to the prefix would leave the button silently posting an ordinary event; the unit test imports the constant precisely so that can't happen).
+**Consequence:** Verified rather than assumed — the built client chunks contain no reference to `drizzle`, `postgres`, `DATABASE_URL` or `@anthropic-ai`.
+
+## 2026-08-14 — The duplicate button posts twice on one click
+
+**Context:** Demonstrating idempotency needs a prior event to collide with, and "post something, then press duplicate" is two steps at the moment a reviewer is forming their first impression.
+**Decision:** One click posts a fresh event and then the identical body again, logging `201` and then `200 duplicate` naming the id it collided with.
+**Alternatives:** Re-sending whatever was posted last (rejected — it depends on session state and does nothing as the first button pressed on an empty board).
+**Consequence:** Always shows the whole shape, never depends on history. The board gains exactly one event from two posts, which is the assertion; the log line is what makes the absence of a second one legible rather than looking like a button that failed.

@@ -7,6 +7,7 @@ import { DetailPanel } from "./DetailPanel";
 import { EmptyBoard, NoSelection } from "./EmptyStates";
 import { FindingCard } from "./FindingCard";
 import { QueueHealth, type ConnectionState } from "./QueueHealth";
+import { SimulatorPanel } from "./SimulatorPanel";
 
 // How long a changed card stays highlighted. Matches the CSS animation in
 // globals.css; the timer only controls when the class comes off.
@@ -15,15 +16,21 @@ const HIGHLIGHT_MS = 2_500;
 export function FindingsBoard({
   initialFindings,
   initialQueue,
+  demoFailureEnabled,
 }: {
   initialFindings: FindingCardData[];
   initialQueue: QueueCounts;
+  demoFailureEnabled: boolean;
 }) {
   const [findings, setFindings] = useState(initialFindings);
   const [queue, setQueue] = useState(initialQueue);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set());
+  // Open on an empty board, because there it *is* the empty state's call to
+  // action. Collapsed once there are findings, so it doesn't eat board height
+  // for someone who is reading rather than generating.
+  const [simulatorOpen, setSimulatorOpen] = useState(initialFindings.length === 0);
 
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -78,6 +85,17 @@ export function FindingsBoard({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <QueueHealth queue={queue} connection={connection} />
+
+      <SimulatorPanel
+        open={simulatorOpen}
+        onToggle={() => setSimulatorOpen((current) => !current)}
+        selected={selected}
+        // The board is sorted priority-first, so this is the top card rather
+        // than the newest one — which is the right fallback anyway: it is what
+        // the operator is looking at when they haven't clicked anything.
+        fallbackFinding={findings[0] ?? null}
+        demoFailureEnabled={demoFailureEnabled}
+      />
 
       {findings.length === 0 ? (
         // Takes over both panes rather than sitting in the 416px list column.

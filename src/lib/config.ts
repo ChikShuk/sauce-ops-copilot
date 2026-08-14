@@ -35,6 +35,16 @@ export const BOARD_POLL_INTERVAL_MS = 1_000;
 // the cheapest thing that counts as traffic.
 export const SSE_KEEPALIVE_MS = 15_000;
 
+// The demo failure trigger's event_id prefix, gated at runtime by
+// ENABLE_DEMO_FAILURE_TRIGGER (see src/worker/processEvent.ts).
+//
+// It lives here rather than beside the code that acts on it because the
+// simulator button needs it too, and processEvent.ts reaches the database —
+// importing it from a client component would pull Drizzle and the connection
+// pool into the browser bundle. config.ts imports nothing, which is what makes
+// it safe to import from anywhere.
+export const FORCE_FAIL_PREFIX = "force_fail_";
+
 // How far from a finding's nearest evidence edge an event may fall and still
 // belong to it. Consecutive evidence within one finding is therefore never more
 // than this far apart. Interacts with two things worth keeping in view:
