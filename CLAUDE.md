@@ -139,7 +139,9 @@ if time runs out there is always a demoable product.
 7. **Event simulator** — buttons for delay / complaint / duplicate / related-to-existing
 8. **Operator action** — mark reviewed/resolved + thumbs down, persisted
 9. **Failure tests** — duplicates, malformed LLM JSON, timeout, out-of-order, concurrent
-10. **Docker Compose** — one-command run
+10. **Docker Compose** — one-command run. Also verify SIGTERM delivery and graceful
+    worker shutdown *inside the Linux container* — Windows never generates SIGTERM,
+    so that path is unverified as of slice 3 and can only be exercised here.
 11. **README + architecture doc**
 
 ---
@@ -155,6 +157,8 @@ if time runs out there is always a demoable product.
 - Comments explain **why**, not what. Especially around concurrency and idempotency.
 - No premature abstraction. Two implementations before extracting an interface —
   except `llm/`, where the interface is required by the fallback design.
+- Never edit code after the verification pass without re-running verification.
+  Lint and typecheck do not validate SQL inside template literals.
 
 ---
 
