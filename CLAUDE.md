@@ -162,20 +162,25 @@ if time runs out there is always a demoable product.
 
 **You handle git. I'll tell you when a slice is done.**
 
+Commit directly to main. No feature branches or PRs — this is a solo,
+time-boxed project and the PR ceremony adds no review value.
+
 ### Trigger phrase: "slice done"
 
 When I say **"slice done"**, run this ritual without further prompting:
-1. `npm run lint` and the test suite; fix what breaks before proceeding
+1. `npm run lint` and `npm run typecheck`; fix what breaks before proceeding
 2. Append an entry to `docs/decisions.md` if this slice involved an architectural
    choice (see format below)
 3. **Update the README.** Open `README.md`, find every section tagged with the slice
    number just completed, and replace `_TODO_` with real content. Sections tagged
    `<!-- OWNER: human -->` are mine — never write those, but if one is still `_TODO_`
    and its slice has passed, tell me it's outstanding.
-4. `git status` and review what's staged — never blind `git add -A` if untracked
-   files look unexpected; ask me
-5. Commit with a Conventional Commits message (format below)
-6. Push
+4. Commit with a Conventional Commits message (format below)
+5. Push
+
+For remaining slices, run these verification steps yourself as part of
+`slice done` and report the actual output — don't report a step as verified
+without showing the command output that proves it.
 
 ### Commit messages
 
@@ -204,9 +209,7 @@ assignment explicitly asks about the save-then-crash case.
 - Never force-push. Never rewrite history. A `fix:` correcting an earlier choice is a
   positive signal, not something to hide.
 - Never commit `.env`. `.env.example` is committed and must stay current.
-- Short-lived branches per slice, squash-merged. Open a PR only for slices with real
-  design decisions (outbox/idempotency, LLM boundary, correlation) — with a real
-  description. Direct commits are fine for `chore:` work.
+- No feature branches, no PRs. Commit and push directly to `main`.
 
 ---
 
