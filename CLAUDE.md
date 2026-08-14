@@ -172,12 +172,13 @@ time-boxed project and the PR ceremony adds no review value.
 ### Trigger phrase: "slice done"
 
 When I say **"slice done"**, run this ritual without further prompting:
-1. `npm run lint` and `npm run typecheck`; fix what breaks before proceeding
+1. `npm run lint`, `npm run typecheck`, and `npm test`; fix what breaks before
+   proceeding
 2. Append an entry to `docs/decisions.md` if this slice involved an architectural
    choice (see format below)
 3. **Update the README.** Open `README.md`, find every section tagged with the slice
    number just completed, and replace `_TODO_` with real content. Sections tagged
-   `<!-- OWNER: human -->` are mine — never write those, but if one is still `_TODO_`
+   `<!-- OWNER: design-chat -->` are mine — never write those, but if one is still `_TODO_`
    and its slice has passed, tell me it's outstanding.
 4. Commit with a Conventional Commits message (format below)
 5. Push

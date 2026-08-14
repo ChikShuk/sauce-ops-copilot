@@ -171,3 +171,101 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Decision:** Exponential, base 1s, cap 5m, no jitter, in `src/lib/queue/backoff.ts`.
 **Alternatives:** Jittered backoff (rejected for now — a single worker process has no thundering herd to spread, and jitter would add non-determinism to verification for no benefit at this scale).
 **Consequence:** With the default `max_attempts = 5` the schedule actually exercised is 1s, 2s, 4s, 8s before the fifth failure dead-letters, so the 5m cap is never reached in practice. These are chosen for demo-ability, not tuned from any real failure distribution — worth saying plainly rather than implying rigor that isn't there.
+
+## 2026-08-14 — Bidirectional correlation window
+
+**Context:** The rolling-window entry above wrote the match predicate one-sidedly, as `last_event_at >= occurred_at - 3h`. That is algebraically `T <= L + 3h` — the real predicate with its lower bound deleted, meaning it has no lower bound at all and *any* arbitrarily old event matches. Since `occurred_at` is validated only to within 7 days past, a six-day-old backfill would merge into the live finding, `LEAST` would drag `first_event_at` back six days, and that finding would then swallow everything at the restaurant.
+**Decision:** `occurred_at BETWEEN first_event_at - 3h AND last_event_at + 3h` — the event is within the window of the *nearest edge* of the finding's evidence interval. On attach the window extends whichever way is needed (`LEAST`/`GREATEST`). This supersedes, and does not edit, the one-sided form in the entry above.
+**Alternatives:** Keeping the one-sided form (rejected — it is the bug described above, and it is the same class as the unbounded-`occurred_at` bug already recorded). Bounds are inclusive at exactly 3h; arbitrary but deliberate, and pinned by unit tests at both `W` and `W + 1ms`.
+**Consequence:** Buys a provable invariant worth stating: consecutive evidence in a finding is never more than 3h apart, since an attach either lands inside `[F, L]` or extends one edge by at most the window. Note the brief's reference scenario passes under *both* predicates, so it cannot discriminate between them — the six-day-backfill non-merge test is what actually covers the lower bound.
+
+## 2026-08-14 — An out-of-window event is two cases, not one
+
+**Context:** With a single "does it match?" predicate, any miss looked like the same thing: close the open finding, start a new one. That is wrong for a backfill. Under it, arrival order `20:10 → six-day-old backfill → 18:12` closes the 20:10 finding when the backfill lands, so the 18:12 event — only two hours from 20:10 — can no longer join it and starts a third finding.
+**Decision:** Split the miss by direction. **Future-side** (`T > last_event_at + 3h`): the window genuinely lapsed, so close the stale finding and open its replacement atomically. **Past-side** (`T < first_event_at - 3h`): a backfill, so create a finding with `closed_at` set *at insert* and leave the live finding entirely untouched. Closing is driven by elapsed time since a finding's own `last_event_at`, never by an unrelated old event arriving.
+**Alternatives:** Documenting the stranding as a known limitation (rejected — it's fixable at the source); matching against recently-closed findings and reopening them (rejected — a second lifecycle path that has to decide what reopening means for an operator-resolved finding, to solve a problem that disappears if closure simply isn't triggered by backfills).
+**Consequence:** `findings_restaurant_id_open_key` is a *partial* index (`WHERE closed_at IS NULL`), so a born-closed row is never in it: a backfill finding coexists with the live open one, and any number coexist with each other. Confirmed by construction and by test. Two follow-ons: the past-side path cannot raise `23505` at all, so the insert-race retry applies only to the create-open path; and "backfill" is judged relative to the open finding's window, never to `now()` — classifying against `now()` would make every event in a historical replay a backfill and nothing would correlate. Residual wrinkle, accepted: two backfills minutes apart, arriving while a live finding is open, each get their own closed finding. The brief's out-of-order case is events *minutes* apart, not week-old backfills.
+
+## 2026-08-14 — closed_at is a lifecycle marker, never a visibility filter
+
+**Context:** Born-closed backfill findings introduce a trap for the slices that follow. A provider replaying webhooks after an outage, or a chain backfilling a shift, produces genuine problems an operator should see — but if downstream code treats "open" as shorthand for "relevant", every one of them silently vanishes from the product.
+**Decision:** Recorded now, as a constraint slices 5 and 6 inherit rather than rediscover. **Enrichment triggers on finding creation, not on open-ness** — `CorrelationResult.outcome` (`created`/`attached`/`replaced` → enrich; `already_attached` → skip) is the trigger, and `closed_at` is not an input to it. **The dashboard must not filter on `closed_at IS NULL`** — it sorts by `last_event_at DESC` (what `findings_last_event_at_idx` exists for) and shows closed findings as historical, not hidden.
+**Alternatives:** Leaving it implicit and letting slice 6 decide (rejected — this is precisely the kind of cross-slice assumption that gets discovered as a bug, and the cost of writing it down now is one paragraph).
+**Consequence:** The only things that read `closed_at` are correlation matching and the partial unique index. Nothing else may treat it as "archived".
+
+## 2026-08-14 — Row lock for update conflicts, unique index for create races
+
+**Context:** Two workers correlating events for the same restaurant concurrently can collide in two structurally different ways, and one mechanism doesn't cover both.
+**Decision:** `SELECT ... FOR UPDATE` on the open finding serializes workers attaching to an *existing* finding, so no `version` bump or `event_count` update is lost. When there is no open finding the `FOR UPDATE` locks nothing, both workers take the create path, and `findings_restaurant_id_open_key` arbitrates — exactly one insert survives.
+**Alternatives:** `pg_advisory_xact_lock(hashtext(restaurant_id))` (rejected — one line and it would eliminate the create race, but an advisory lock is *advisory*: any future code path that inserts a finding without taking it silently breaks "one open finding per restaurant", whereas the index cannot be bypassed. The index is the guarantee; the lock would be a convenience on top of it).
+**Consequence:** Lock ordering is uniform across workers (findings row → `finding_events` insert → findings update), so no deadlock cycle exists.
+
+## 2026-08-14 — Unique violations matched by SQLSTATE and constraint name; exactly one retry
+
+**Context:** The create-race loser has to recognize *its* violation and recover, without swallowing unrelated constraint failures.
+**Decision:** `isUniqueViolation(err, constraintName)` in `src/lib/db/pgError.ts` walks the `cause` chain (bounded, cycle-guarded) and requires **both** `code === "23505"` **and** `constraint_name === <name>`. Never matches on `err.message`. The retry is exactly one, in a *new* transaction — a `23505` aborts the current one, so it cannot be a continuation.
+**Alternatives:** Matching the error message (rejected — message text is a driver/server formatting detail that would silently start passing or failing on a version bump). `ON CONFLICT (restaurant_id) WHERE closed_at IS NULL DO NOTHING` (rejected — valid Postgres, and it avoids aborting the transaction, but zero returned rows conflates "someone won the race" with "nothing happened", and the loser still has to re-run the whole window decision against the winner's finding from a stale snapshot). A retry loop (rejected — the bound is structural: a second failure means an assumption is wrong, not that the database is busy, so it belongs in the DLQ).
+**Consequence:** The error shape was **verified against a real violation before the predicate was written**, not inferred from the driver source — the same category of confidence that produced the `claimed_at` fencing-token bug. Observed: `DrizzleQueryError` at depth 0 (keys `query`, `params`, `cause`) wrapping `PostgresError` at depth 1 carrying `code: "23505"` and `constraint_name: "findings_restaurant_id_open_key"` (snake_case; no `constraint` field exists), identical inside `db.transaction` and for a bare `db.execute`, with a foreign-key violation correctly distinguishable as `23503`.
+
+## 2026-08-14 — Close and replace as two ordered statements, not one CTE
+
+**Context:** `enqueueEvent.ts` set a precedent of expressing multi-step writes as a single CTE statement, and the close-then-replace path looks like an obvious candidate.
+**Decision:** Two separate statements inside one `db.transaction`.
+**Alternatives:** One CTE statement (rejected, and this is the one place the established style is actively wrong: all CTEs in a statement share a single snapshot, so `findings_restaurant_id_open_key` would still see the pre-close row version as a live conflict and the insert would raise `23505` against a row the same statement had just closed. Separate statements inside a transaction *do* see each other's effects).
+**Consequence:** An outside reader under READ COMMITTED sees either the old open finding or the new one — never neither, never both. The zero-open interval exists only inside the transaction. The comment in the code says why, because the next person to read it will reach for the CTE.
+
+## 2026-08-14 — Redelivery guard, and counter bumps gated on actual insertion
+
+**Context:** The worker's stale-reclaim path can hand the same event to correlation twice. `finding_events` has a composite PK and `UNIQUE(event_id)`, so the attach itself is naturally idempotent — but that alone is not enough.
+**Decision:** A `SELECT finding_id FROM finding_events WHERE event_id = $1` guard as the first statement in the transaction, returning `already_attached` if present. Separately, the recompute-and-update step is gated on the attach having actually inserted a row.
+**Alternatives:** Relying on `ON CONFLICT DO NOTHING` alone (rejected — it leaves a real bug: if the event's original finding has since closed, the redelivered event finds no open finding, creates a new one, *then* no-ops on the attach, leaving a finding with zero evidence. Verified by test).
+**Consequence:** A redelivery leaves `findings` byte-identical — no `version` bump, no `event_count` change, no `priority` write. This matters beyond tidiness: `version` is what slice 6's SSE will key on, so a spurious bump is a spurious push to every connected dashboard.
+
+## 2026-08-14 — Denormalized fields recomputed, not incremented
+
+**Context:** `event_count`, `first_event_at` and `last_event_at` duplicate information that `finding_events` already holds.
+**Decision:** Recompute all three from the evidence set on every update (`count`/`min`/`max`), rather than `event_count = event_count + 1` and iterated `LEAST`/`GREATEST`.
+**Alternatives:** Incrementing (rejected — mathematically identical when everything goes right, but it drifts permanently once it is wrong even once, whereas a recompute converges after any partially applied or retried run).
+**Consequence:** One extra read of the evidence set per correlation, inside the transaction that already holds the row lock.
+
+## 2026-08-14 — Priority thresholds in one table, scored by a pure function
+
+**Context:** Priority is deterministic business rules that slice 9 tests directly and the README has to state. Scattered through the correlation path as conditionals, they would be neither.
+**Decision:** `PRIORITY_THRESHOLDS` in `src/lib/correlation/priority.ts` holds the entire severity policy as data — delay minutes, event count, review rating, recurrence by issue class. `scorePriority()` is pure: the recurrence count is passed *in* rather than queried, so the whole policy is unit-testable with no database. Priority is the **max** across signals, never a sum. Thresholds deliberately do not live in `config.ts` — they belong beside the function that reads them.
+**Alternatives:** Summing or weighting signals (rejected — max is what lets recurrence and event count overlap without compounding: 3 events of one issue class is a pattern and outranks 3 of mixed classes, which is what the `issue_class` taxonomy was built to buy).
+**Consequence:** `scorePriority` also returns `drivers` — which signals fired and why. That is the deterministic answer to "why is this high", which slice 5 hands the model as a *given* so the summary narrates a fact instead of inventing a rationale, and which makes the tests assert on specific signals rather than a bare enum. In-memory only for now; persisting it is an additive migration to decide before slice 6. The threshold values themselves are demo-appropriate placeholders, not tuned against any real distribution.
+
+## 2026-08-14 — Recurrence anchored to last_event_at, not now()
+
+**Context:** The recurrence signal counts same-issue-class events at a restaurant over a 24h window, which needs an anchor.
+**Decision:** Anchor to the finding's own `last_event_at`.
+**Alternatives:** `now()` (rejected — reprocessing the same evidence a day later would yield a different priority for identical input, which is nondeterministic and would make the integration tests time-dependent).
+**Consequence:** `scorePriority` is a pure function of the evidence set, and replaying a job produces the same score it did the first time.
+
+## 2026-08-14 — findings.status stays 'accepted' through slice 4
+
+**Context:** The status machine has `accepted → processing → ready | failed`, and correlation could plausibly claim one of the later states.
+**Decision:** Correlation leaves `status = 'accepted'`. `processing` and `ready` are the LLM enrichment's transitions and slice 5 owns both.
+**Alternatives:** Setting `ready` once a finding is correlated and prioritized (rejected — slice 5 would have to un-set it, and in the meantime the dashboard would show `ready` findings with empty summaries, which is actively misleading against the brief's own status requirement).
+**Consequence:** A finding that is correlated, prioritized and evidenced but not yet summarized is legitimately still `accepted`. `CorrelationResult.outcome` is a four-value discriminant precisely so slice 5 can tell whether enrichment is needed at all.
+
+## 2026-08-14 — Window logic and aggregates in TypeScript, not SQL
+
+**Context:** The window predicate and the denormalized aggregates could be expressed either in the SQL statements or in the surrounding TypeScript.
+**Decision:** SQL does only what must happen at the database — the lock, the constraint, the reads, the writes. The window decision and the evidence summary are pure TypeScript.
+**Alternatives:** Pushing the predicate into the `WHERE` clause of the lookup (rejected — it would mean one implementation in SQL and a twin in TS for the unit tests, which can drift; and CLAUDE.md now explicitly records that lint and typecheck do not validate SQL inside template literals, a lesson this project learned by shipping exactly that bug).
+**Consequence:** About six round trips per event inside one transaction, versus one or two for a clever single-statement version. Not the bottleneck at this scale, and the readability and direct unit-testability are worth more — but worth stating plainly rather than hiding.
+
+## 2026-08-14 — Vitest: unit/integration split, isolation by restaurant id
+
+**Context:** The project's first tests arrive with correlation, and slice 9's failure tests need somewhere to live.
+**Decision:** Vitest with two projects — `unit` (pure, no database) and `integration` (against the dockerized dev DB, `fileParallelism: false`). Integration tests isolate by generating a unique `restaurant_id` per test rather than truncating between tests. `src/lib/db/client.ts` gains `closeDb()` because the module-level pool otherwise leaves Vitest hanging.
+**Alternatives:** Truncation between tests (rejected — per-restaurant isolation is *semantically exact* rather than a workaround: the partial unique index, the open-finding lookup and the recurrence count are all scoped by `restaurant_id`, so two tests using different restaurants cannot interact by construction. It also makes "exactly one finding" a precise assertion instead of one that depends on an empty table. A `resetDb()` helper ships anyway for slice 9). A separate `sauce_ops_test` database (rejected — an init script and another env var to provide isolation the restaurant scoping already gives).
+**Consequence:** The slice-done ritual in CLAUDE.md now runs `npm test` alongside lint and typecheck, closing an inconsistency with `.claude/commands/slice-done.md`, which already described the ritual as including tests.
+
+## 2026-08-14 — A concurrency test that passes is not a concurrency test that ran
+
+**Context:** The first version of the concurrent-correlation tests passed immediately. Checking whether the insert-race retry had actually fired showed it never had — the transactions simply serialized, and the tests were green for a reason unrelated to what they claimed to cover.
+**Decision:** Added a test that forces the collision deterministically: a competing transaction inserts the open finding and is held open across the correlation attempt, so the blocked insert is guaranteed to raise `23505` when the competitor commits. The test asserts on the emitted `correlation.insert_race_retry` log line, not merely on the final outcome — `attached` is also what a no-race run produces, so the outcome alone cannot distinguish them.
+**Alternatives:** Trusting the naturally-concurrent test (rejected — it was demonstrably passing without exercising the path; a race that "usually doesn't happen" in a test is a race that is untested).
+**Consequence:** Worth generalizing: for any test whose subject is a race, the assertion has to distinguish "the recovery path ran and worked" from "the situation never arose". Slice 9's failure tests should hold to the same standard.

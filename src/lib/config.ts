@@ -21,3 +21,15 @@ export const PROCESSING_TIMEOUT_MS =
 // Idle polling cost only — the loop re-polls immediately after a successful
 // claim, so this is never a per-job tax. See src/worker/index.ts.
 export const POLL_INTERVAL_MS = 1_000;
+
+// How far from a finding's nearest evidence edge an event may fall and still
+// belong to it. Consecutive evidence within one finding is therefore never more
+// than this far apart. Interacts with two things worth keeping in view:
+// findings_restaurant_id_open_key (at most one open finding per restaurant, so
+// a lapsed window is what lets the next one start) and the occurred_at bound in
+// events/schema.ts (7 days past), which is the range of backfill this window
+// has to classify correctly.
+//
+// Priority thresholds deliberately do NOT live here — they belong beside the
+// pure function that reads them, in correlation/priority.ts.
+export const CORRELATION_WINDOW_MS = 3 * 60 * 60_000;

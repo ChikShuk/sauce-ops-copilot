@@ -8,6 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:watch": "vitest --project unit",
     "worker": "tsx src/worker/index.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/lib/db/migrate.ts",
@@ -32,6 +36,7 @@
     "eslint-config-next": "16.3.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.12",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   }
 }

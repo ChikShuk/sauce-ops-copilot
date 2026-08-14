@@ -6,7 +6,7 @@ dashboard.
 
 > **Note to self — delete this block before submitting.**
 > Each section below is tagged `<!-- OWNER: agent | slice: N -->` or
-> `<!-- OWNER: human -->`. The agent fills its sections during the slice-done ritual.
+> `<!-- OWNER: design-chat -->`. The agent fills its sections during the slice-done ritual.
 > Human-owned sections are judgment calls and must be written by me, in my own voice.
 > A section still containing `_TODO_` at submission time is a bug.
 
@@ -111,7 +111,58 @@ second request. Worker-side idempotency — checking `event_jobs.status` before
 processing a claimed row — is slice 3's job and isn't built yet.
 
 ### Correlation and finding lifecycle
-<!-- slice: 4 --> _TODO_
+<!-- slice: 4 -->
+There is no correlation *key*. A finding is a live incident at a restaurant, and an
+event joins it when it falls within three hours of the nearest edge of that finding's
+existing evidence:
+
+```sql
+occurred_at BETWEEN first_event_at - INTERVAL '3 hours'
+                AND last_event_at  + INTERVAL '3 hours'
+```
+
+Attaching extends the window in whichever direction is needed (`LEAST`/`GREATEST`),
+which buys a property worth stating: consecutive evidence within one finding is never
+more than three hours apart, since an attach either lands inside the existing interval
+or extends one edge by at most the window. A static key — `order_id`, or
+restaurant + issue class + time bucket — fails the brief's own worked example, which
+is a *mixed-type* incident spanning 2h15m; both `issue_class` in the key and any fixed
+bucket boundary split it. That's why `findings` has no `issue_class` column at all.
+
+An out-of-window event is two different situations, not one. If it's **after** the
+window, time genuinely moved on: close the stale finding, open a replacement, both in
+one transaction. If it's **before** the window it's a backfill, and closing is driven
+by elapsed time since a finding's own last event — never by an unrelated old event
+arriving — so the live finding is left untouched and the backfill gets its own finding,
+created already closed. Without that split, a week-old replayed webhook would close the
+current incident and strand later evidence that should have joined it.
+
+`closed_at` (correlation-owned, set when a window lapses) is deliberately separate from
+`resolved_at` (operator-owned). It is a **lifecycle marker, not a visibility filter**:
+closed findings are still enriched and still appear on the dashboard as historical.
+A backfilled incident is a real problem someone should see.
+
+Priority is deterministic and lives in one table, `src/lib/correlation/priority.ts`:
+
+| signal | medium | high | critical |
+|---|---|---|---|
+| `delay_minutes` (max across evidence) | 20 | 45 | 90 |
+| event count | 2 | 4 | 6 |
+| review `rating` (min across evidence) | ≤3 | ≤2 | — |
+| recurrence, same `issue_class` in 24h | 2 | 3 | 5 |
+
+The result is the **max** across signals, never a sum — which is what lets recurrence
+and event count overlap without compounding: three events of one issue class is a
+pattern and outranks three of mixed classes. Scoring also returns *drivers* (which
+signals fired, and why), so "why is this high" is answered by code; slice 5 hands that
+to the model as a given rather than letting it invent a rationale. The thresholds are
+demo-appropriate placeholders, not tuned against real incident data.
+
+Verified end to end against the brief's scenario — `delivery_delay` 17:55,
+`complaint` 18:12, `negative_review` 20:10 — posted out of order through the real API
+and drained by the real worker: one finding, three evidence rows, `first_event_at`
+17:55, `last_event_at` 20:10, priority `high`. All six arrival permutations converge on
+the same result.
 
 ### LLM failure handling and degraded findings
 <!-- slice: 5 --> _TODO_
@@ -145,8 +196,32 @@ ready for the UI to consume once it exists.
 
 ### Out-of-order events
 <!-- OWNER: agent | slice: 4 -->
-_TODO_ — correlation strategy, update vs. regenerate, how later evidence modifies an
-existing finding, aggregation/debounce window, how the dashboard reflects updates.
+The match predicate is bidirectional, so an event that arrives late but *happened*
+earlier still joins its finding and pulls `first_event_at` backwards. This is the case
+a one-sided predicate (`last_event_at >= occurred_at - 3h`) silently gets wrong: that
+form has no lower bound at all, so a six-day-old backfill would match the live finding
+and then drag its window six days back, after which it would swallow everything at that
+restaurant.
+
+Findings are **updated, never regenerated**. New evidence attaches, the denormalized
+fields are recomputed from the evidence set, and `version` increments — which is what
+slice 6's SSE will key on to push an update. Recomputing rather than incrementing means
+the aggregates converge after a partially applied or retried run instead of drifting
+permanently once wrong.
+
+The three-hour window *is* the aggregation window; there is no separate debounce. An
+event arriving hours after its siblings still joins them if it falls inside it.
+
+Worked example, arriving in the worst order — review (20:10) first, then the delay
+(17:55), then the complaint (18:12): the review creates the finding; the delay is
+2h15m *earlier* but within the window, so it attaches and `first_event_at` moves back
+to 17:55; the complaint lands inside the interval and attaches. One finding, three
+evidence rows. Verified through the real API and worker, not just in tests.
+
+Honest limitation: two backfills minutes apart, arriving while a live finding is open,
+each get their own closed finding rather than correlating with each other. The brief's
+out-of-order case is events minutes apart, not week-old replays, so this is documented
+rather than fixed.
 
 ### Partial failure
 <!-- OWNER: agent | slice: 3 -->
@@ -199,17 +274,51 @@ What the operator sees while behind. Findings are created deterministically at c
 
 ### Concurrent processing
 <!-- OWNER: agent | slice: 4 -->
-_TODO_ — how conflicting updates to the same finding are prevented.
+Two workers correlating events for the same restaurant collide in two structurally
+different ways, and one mechanism doesn't cover both.
+
+**Updating an existing finding** is serialized by `SELECT ... FOR UPDATE` on the open
+finding row. The second worker blocks until the first commits, then proceeds against
+fresh state — so no `version` bump or `event_count` update is lost.
+
+**Creating a finding** can't be serialized that way: when there is no open finding the
+`FOR UPDATE` locks nothing, both workers take the create path, and
+`UNIQUE (restaurant_id) WHERE closed_at IS NULL` arbitrates. Exactly one insert
+survives. The loser catches the violation by **SQLSTATE `23505` plus the constraint
+name** — never by matching the error message, which is a driver formatting detail that
+would silently start passing or failing on a version bump — and retries **exactly
+once**, in a fresh transaction. A `23505` aborts the current transaction, so the retry
+can't be a continuation; and a second failure means an assumption is wrong rather than
+that the database is busy, so it goes to the DLQ instead of spinning.
+
+The error shape was verified against a real violation before the matching code was
+written: `DrizzleQueryError` wrapping `PostgresError` one level down, carrying
+`code: "23505"` and `constraint_name` (snake_case), identical inside and outside a
+transaction, with a foreign-key violation correctly distinguishable as `23503`.
+
+An advisory lock would have removed the create race in one line, and was rejected:
+advisory locks are advisory, so any future insert path that forgot to take one would
+silently break the one-open-finding invariant. The index cannot be bypassed.
+
+Lock ordering is uniform across workers — findings row, then `finding_events` insert,
+then findings update — so there is no deadlock cycle.
+
+Worth noting how this was tested, because the first version of the concurrency tests
+passed without ever exercising the race: the transactions simply serialized. The test
+that covers it now forces the collision deterministically, by holding a competing
+transaction open across the correlation attempt, and asserts that the retry path
+actually ran rather than only checking the final state — which would look identical
+either way.
 
 ### Redis and temporary state
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 _TODO_ — we don't use Redis. State the question they asked and answer it: nothing
 breaks, nothing is lost, because no permanent business data lives outside Postgres.
 
 ---
 
 ## Operator feedback loop
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 
 _TODO_ — what the persisted operator action is, and how this feedback improves the
 product/model over time (eval set from thumbs-down, prompt iteration, threshold
@@ -225,7 +334,7 @@ _TODO_ — list each test, what it proves, and how to run it.
 ---
 
 ## Known limitations
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 
 _TODO_ — honest list. Correlation is rule-based and misses fuzzy links; single-node
 worker; no auth; no tenant isolation; polling interval; no eval harness; etc.
@@ -233,7 +342,7 @@ worker; no auth; no tenant isolation; polling interval; no eval harness; etc.
 ---
 
 ## Product and entrepreneurial judgment
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 
 _The eleven questions from the brief. Answer each in 2–4 sentences._
 
@@ -252,7 +361,7 @@ _The eleven questions from the brief. Answer each in 2–4 sentences._
 ---
 
 ## What I would do with one more day
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 
 _TODO_ — specific and prioritized, not a wish list. Eval harness on a golden set of
 event bundles is the strongest candidate.
@@ -260,7 +369,7 @@ event bundles is the strongest candidate.
 ---
 
 ## What I would change before production
-<!-- OWNER: human -->
+<!-- OWNER: design-chat -->
 
 _TODO_ — real broker or partitioned queue, per-tenant rate limits and spend caps,
 auth and tenant isolation, observability, LLM cost controls, reconciliation job.
@@ -268,7 +377,7 @@ auth and tenant isolation, observability, LLM cost controls, reconciliation job.
 ---
 
 ## AI tool usage disclosure
-<!-- OWNER: human, with agent supplying the factual record -->
+<!-- OWNER: design-chat, with agent supplying the factual record -->
 
 _TODO_ — which tools, what they did, what I decided, how I verified their output.
 Reference `CLAUDE.md` and `.claude/commands/` as evidence of deliberate setup, and
