@@ -21,16 +21,16 @@ type Row = { id: string; inserted: boolean };
 // duplicates serialize on a lock for no reason. Instead, the UNION ALL
 // branch below does a plain, lock-free SELECT for the existing row's id,
 // and only runs at all when the insert didn't happen.
+//
+// occurredAt is passed as .toISOString(), not as a raw Date: db.execute's
+// sql tag has no column-type context, and postgres.js's parameter binder
+// rejects a bare Date at this layer (it's fine through the query builder,
+// which knows the column is a timestamp and serializes accordingly).
 export async function enqueueEvent(row: NewEventRow): Promise<EnqueueResult> {
   const result = await db.execute<Row>(sql`
     WITH new_event AS (
       INSERT INTO events (event_id, restaurant_id, order_id, event_type, issue_class, occurred_at, payload)
       VALUES (${row.eventId}, ${row.restaurantId}, ${row.orderId}, ${row.eventType},
-              // .toISOString(), not the raw Date: db.execute's raw sql tag
-              // has no column-type context, and postgres.js's parameter
-              // binder rejects a bare Date object at this layer (it's fine
-              // through the query builder, which knows the column is a
-              // timestamp and serializes accordingly).
               ${row.issueClass}, ${row.occurredAt.toISOString()}, ${JSON.stringify(row.payload)}::jsonb)
       ON CONFLICT (restaurant_id, event_id) DO NOTHING
       RETURNING id
