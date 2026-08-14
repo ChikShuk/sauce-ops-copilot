@@ -1,0 +1,1 @@
+See CLAUDE.md for project context, architectural invariants, and workflow.
