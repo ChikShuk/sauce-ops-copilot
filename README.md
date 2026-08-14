@@ -67,7 +67,19 @@ _These are distilled from `docs/decisions.md`. Each should be 3–5 sentences: t
 constraint, the choice, the alternative rejected, the cost._
 
 ### Postgres as queue (no Redis)
-<!-- slice: 3 --> _TODO_
+<!-- slice: 3 -->
+The queue is the `event_jobs` table, claimed with `SELECT ... FOR UPDATE SKIP
+LOCKED` inside a single `UPDATE` that also increments `attempts` and sets the
+status — so two workers can never hold the same job, and a claim can't be lost
+between selecting and marking it. The brief warns against reaching for Redis to
+satisfy a checkbox, and at this scale it would buy nothing: Postgres already
+gives atomic claim semantics, and keeping the queue in the same database as the
+business data means a job row and its event commit or fail together. Two things
+this costs, honestly: throughput ceilings well below a real broker (fine here,
+irrelevant at 100k events/sec), and polling latency instead of push delivery —
+the loop sleeps 1s only when it finds nothing, so an idle queue costs one query
+per second and a busy one costs nothing extra. If this ever outgrew Postgres,
+`event_jobs` becomes the outbox and a relay ships rows to the real broker.
 
 ### Transactional outbox
 <!-- slice: 2 -->
@@ -138,8 +150,37 @@ existing finding, aggregation/debounce window, how the dashboard reflects update
 
 ### Partial failure
 <!-- OWNER: agent | slice: 3 -->
-_TODO_ — save-then-crash, and process-then-crash-before-ack. How lost events,
-duplicate processing, duplicate findings, and inconsistent UI state are avoided.
+**Save-then-crash** can't happen: the event row and its `event_jobs` row are
+written by one SQL statement (see "Transactional outbox" above), so there is no
+instant where an event exists without queued work waiting on it.
+
+**Process-then-crash-before-ack** is the real case. A worker claims a job,
+commits that claim immediately, and then does its work — it deliberately does
+*not* hold the row lock while processing, because slice 5's LLM call must not
+pin a database connection for its duration. So a worker that dies mid-job leaves
+the row in `processing` with nothing holding it. The claim query's second
+eligibility branch handles this: a job whose `claimed_at` is older than
+`PROCESSING_TIMEOUT_MS` (45s, derived from the LLM timeout budget so a slow-but-
+alive call can't be stolen) is reclaimable by any worker. Every claim increments
+`attempts`, including reclaims, so a job that crash-loops burns its retry budget
+rather than being retried forever; once the budget is spent, the claim statement
+itself routes it to `dead_letter` — with an explicit `last_error` recording why,
+since a crash-looped job never reaches the normal failure handler that would
+otherwise write one.
+
+**Duplicate processing** is prevented on both sides of that window. `SKIP LOCKED`
+means two workers can never claim the same row concurrently. And a worker that
+was stale-reclaimed while still running can't clobber the new claimant: each
+claim mints a fresh `claim_token`, and the disposition write only applies if the
+token still matches, so a superseded worker updates zero rows and logs
+`job.disposition_superseded`. Verified with two workers against twelve events —
+all twelve finished with `attempts = 1`, meaning no job was ever claimed twice.
+
+**Duplicate findings** aren't reachable from this path yet: correlation lands in
+slice 4, and `finding_events` already carries a `UNIQUE(event_id)` constraint so
+one event can only ever evidence one finding. **Inconsistent UI state** is out of
+scope until slice 6 — nothing reads job status from the UI yet, so the worker's
+only observable effect today is the row transition and its log lines.
 
 ### Traffic spike (100,000 events in 10 minutes)
 <!-- OWNER: human -->

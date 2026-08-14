@@ -78,6 +78,10 @@ export const eventJobs = pgTable(
     eventId: uuid("event_id")
       .primaryKey()
       .references(() => events.id, { onDelete: "cascade" }),
+    // 'pending' = never attempted; 'failed' = errored, waiting for
+    // next_attempt_at. Both are claim-eligible on the same terms — keeping
+    // them distinct is what lets the DB tell "never tried" from "tried and
+    // will retry". See src/lib/queue/claimJob.ts.
     status: text("status").notNull().default("pending"),
     // Incremented at claim time, not just on failure, so a worker that
     // claims and then hard-crashes still eventually exhausts retries.
@@ -88,6 +92,13 @@ export const eventJobs = pgTable(
       .defaultNow(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     claimedBy: text("claimed_by"),
+    // Fencing token, regenerated on every claim. A worker replays the token
+    // it was handed when writing its disposition, so a worker whose job was
+    // stale-reclaimed while it was still running updates zero rows instead
+    // of clobbering the new claim. Deliberately not claimed_at: that round
+    // trips through a JS Date, which truncates Postgres's microseconds and
+    // makes the equality check silently never match.
+    claimToken: uuid("claim_token"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -98,9 +109,18 @@ export const eventJobs = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
+    // The claim query's time-gated branch: both statuses are eligible on
+    // identical terms, so one index covers both.
     index("event_jobs_next_attempt_at_idx")
       .on(table.nextAttemptAt)
-      .where(sql`${table.status} = 'pending'`),
+      .where(sql`${table.status} in ('pending', 'failed')`),
+    // The claim query's stale-reclaim branch — a different column and
+    // predicate, so it earns its own partial index rather than being folded
+    // into the one above. Two partial indexes let Postgres BitmapOr across
+    // them instead of falling back to a seq scan as finished jobs pile up.
+    index("event_jobs_processing_claimed_at_idx")
+      .on(table.claimedAt)
+      .where(sql`${table.status} = 'processing'`),
     check(
       "event_jobs_status_check",
       sql`${table.status} in ('pending', 'processing', 'succeeded', 'failed', 'dead_letter')`,

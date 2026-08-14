@@ -1,0 +1,1 @@
+ALTER TABLE "event_jobs" ADD COLUMN "claim_token" uuid;

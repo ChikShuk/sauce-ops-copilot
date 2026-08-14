@@ -116,4 +116,53 @@ Response contract: `201` new / `200` duplicate, both bodies now carry `id` — t
 **Context:** Needed to decide how the atomic event+job write is expressed in code, and how strict request validation should be.
 **Decision:** `enqueueEvent` uses `db.execute(sql\`...\`)` with the raw CTE (the same single canonical statement slice 1 already verified), not query-builder composition — there are two data-modifying CTEs plus a `UNION ALL`, which the query builder can't express as one statement anyway, so there's no abstraction to gain. Every Zod object in `src/lib/events/schema.ts` — the top-level discriminated union members and each payload — uses `.strict()`, so unknown fields 400 instead of silently vanishing.
 **Alternatives:** Composing the write via Drizzle's query builder in multiple round trips (rejected — breaks the single-statement atomicity guarantee); non-strict Zod objects (rejected — this is a graded correctness exercise; unknown fields silently dropped is a worse failure mode than a 400 telling the caller their request didn't match).
-**Consequence:** `enqueueEvent.ts` reads as one dense SQL statement with a comment block explaining the non-obvious parts (why `DO NOTHING` not `DO UPDATE`, why `.toISOString()` not a bare `Date` — postgres.js's raw parameter binder needs a string at this layer, unlike through the query builder, which knows the column's type).
+**Consequence:** `enqueueEvent.ts` reads as one dense SQL statement with a comment block explaining the non-obvious parts (why `DO NOTHING` not `DO UPDATE`, why `.toISOString()` not a bare `Date` — postgres.js's raw parameter binder needs a string at this layer, unlike through the query builder, which knows the column's type). Note the comment block sits *above* the function, not inside the template literal: an earlier revision put it inside, where JS `//` is literal text rather than a comment, which produced invalid SQL and broke every ingestion request until it was caught in slice 3 (fixed in `0f6a921`).
+
+## 2026-08-14 — 'failed' is a resting status distinct from 'pending'
+
+**Context:** `event_jobs.status`'s CHECK constraint enumerates five values, but a failed attempt with retries remaining could just as easily go straight back to `'pending'` with a future `next_attempt_at` — in which case `'failed'` would never be stored and the enum value would be dead weight.
+**Decision:** `'pending'` means "never attempted"; `'failed'` means "errored at least once, waiting for `next_attempt_at`". The claim query's time-gated branch is therefore `status IN ('pending', 'failed') AND next_attempt_at <= now()`.
+**Alternatives:** Collapsing failed-with-retries-left back into `'pending'` (rejected — it wastes an already-migrated enum value, and leaves the DB unable to distinguish "never tried" from "tried once, about to retry", which is exactly what an ops view wants to see).
+**Consequence:** The existing partial index widened from `WHERE status = 'pending'` to `WHERE status IN ('pending', 'failed')` — a direct generalization of the same query, not a new index shape. Both statuses share identical claim semantics, which is the signal this is the right cut.
+
+## 2026-08-14 — Stale-'processing' reclaim, with the timeout derived from the LLM bounds
+
+**Context:** The claim statement commits immediately rather than holding a row lock across the handler call — it has to, since slice 5's LLM call must not pin a DB lock for its duration. That leaves nothing to free a job whose worker claimed it and then hard-crashed: it sits in `'processing'` forever.
+**Decision:** Fold a staleness branch into the claim query's eligibility set (`status = 'processing' AND claimed_at < now() - PROCESSING_TIMEOUT_MS`), so the next worker reclaims it. `attempts` increments on every claim including reclaims, so a crash-loop still burns retry budget. `PROCESSING_TIMEOUT_MS` is **derived**, in `src/lib/config.ts`, as `LLM_TIMEOUT_MS * MAX_LLM_ATTEMPTS + PROCESSING_MARGIN_MS` (45s today) from LLM constants stubbed there now and consumed for real in slice 5.
+**Alternatives:** A hardcoded timeout with a "revisit when the LLM lands" note in this log (rejected — a note here doesn't survive to slice 5; a derived constant widens automatically when the LLM bounds change, so a legitimately slow call can't be stale-reclaimed and burn a retry it never earned). Holding the row lock for the duration of processing (rejected — pins a DB connection per in-flight job and turns a slow LLM call into database pressure).
+**Consequence:** A second partial index (`event_jobs_processing_claimed_at_idx` on `claimed_at WHERE status = 'processing'`) so the OR'd claim query can BitmapOr across both branches instead of degrading to a seq scan as finished jobs accumulate.
+
+## 2026-08-14 — Claim-time dead-lettering, with an explicit last_error
+
+**Context:** A job that crash-loops — claimed, worker dies, stale-reclaimed, dies again — never reaches `markFailed`, which is where the normal retry-budget check lives. Without another mechanism it would be reclaimed forever.
+**Decision:** The claim statement itself checks the budget: if `attempts + 1 > max_attempts`, the job transitions to `'dead_letter'` instead of `'processing'`, and the worker skips the handler entirely on seeing that status. That branch also writes an explicit `last_error` naming the cause ("dead-lettered at claim: exceeded max_attempts (N) after repeated processing timeouts; last claimed by X").
+**Alternatives:** Dead-lettering only in `markFailed` (rejected — unreachable for exactly the jobs that most need bounding). Leaving `last_error` untouched on that branch (rejected — the row would carry a stale message from an earlier attempt, or NULL if it crashed on its first, and an undiagnosable dead letter only half-answers the brief's requirement to handle permanently failed messages).
+**Consequence:** Every dead letter carries a reason, whichever path produced it. The claim query is correspondingly denser — four `CASE` expressions keyed on the same budget predicate.
+
+## 2026-08-14 — claim_token as the disposition fencing token, not claimed_at
+
+**Context:** Since no lock is held during processing, a worker that stalls past `PROCESSING_TIMEOUT_MS` without actually dying can have its job reclaimed by another worker, then finish and write its own disposition — clobbering the new claim. The disposition writes need to be conditional on the claim still being current. The first implementation used `claimed_at` as that condition.
+**Decision:** A dedicated `claim_token uuid` column, regenerated via `gen_random_uuid()` on every claim and replayed by the worker in the `WHERE` clause of `markSucceeded`/`markFailed`. A superseded worker updates zero rows and logs `job.disposition_superseded` rather than throwing.
+**Alternatives:** `claimed_at` as the token (rejected — **and caught in verification, not review**: Postgres `timestamptz` keeps microseconds, but round-tripping through a JS `Date` and `.toISOString()` truncates to milliseconds, so the equality check never matched. Every disposition silently no-opped and jobs stayed `'processing'` forever. An opaque UUID has no precision or timezone semantics to get wrong).
+**Consequence:** One extra nullable column and a migration. The bug is the argument for the design: a fencing token whose correctness depends on timestamp precision surviving two serialization layers is a worse mechanism than one that's just an equal-or-not identifier.
+
+## 2026-08-14 — Placeholder handler is a no-op success, not a NotImplemented throw
+
+**Context:** The worker loop needs something to call per claimed job, but correlation (slice 4) and LLM enrichment (slice 5) don't exist yet.
+**Decision:** `src/worker/processEvent.ts` resolves without doing anything, commented as the seam where slices 4-5 land.
+**Alternatives:** `throw new Error("not implemented")` (rejected — it would route every real job to failure and then the DLQ, making working queue mechanics look broken and burning the retry budget of every event ingested before slice 4).
+**Consequence:** Slice 3's observable success is `pending → processing → succeeded` plus the log line, which is exactly what the queue mechanics are supposed to produce. The retry/backoff/DLQ paths can't be exercised through the happy path, so they were verified by driving the queue functions directly against manufactured job rows.
+
+## 2026-08-14 — Poll interval is idle-only; sleep is abortable
+
+**Context:** A naive loop sleeps every iteration, which makes the poll interval a per-job tax and caps throughput at one job per interval regardless of how fast processing is. Separately, an idle worker asleep in a poll interval ignores a shutdown signal until the timer expires.
+**Decision:** Sleep only when a claim returns nothing — after a successful claim, and after a claim-time dead-letter, the loop continues immediately. And the sleep is abortable: the signal handler resolves the in-flight timer, extracted into `src/lib/sleep.ts` (`createSleeper()`) so the wake behaviour is directly exercisable rather than trapped inside the loop.
+**Alternatives:** Sleeping unconditionally each iteration (rejected — throughput would be bounded by the interval instead of by processing time, which is the wrong answer to the brief's traffic-spike question). Leaving the sleep inline in `index.ts` (rejected — Windows never generates SIGTERM, so the signal path can only be verified in the Linux container at slice 10; extracting the sleeper at least makes the wake mechanism itself verifiable now).
+**Consequence:** Under load a burst drains as fast as workers can consume it. Verified: `wake()` cut a requested 60000ms sleep to 65ms, while an un-woken sleep ran its full duration.
+
+## 2026-08-14 — Backoff constants are demo-appropriate placeholders
+
+**Context:** Retry scheduling needs a formula and numbers.
+**Decision:** Exponential, base 1s, cap 5m, no jitter, in `src/lib/queue/backoff.ts`.
+**Alternatives:** Jittered backoff (rejected for now — a single worker process has no thundering herd to spread, and jitter would add non-determinism to verification for no benefit at this scale).
+**Consequence:** With the default `max_attempts = 5` the schedule actually exercised is 1s, 2s, 4s, 8s before the fifth failure dead-letters, so the 5m cap is never reached in practice. These are chosen for demo-ability, not tuned from any real failure distribution — worth saying plainly rather than implying rigor that isn't there.

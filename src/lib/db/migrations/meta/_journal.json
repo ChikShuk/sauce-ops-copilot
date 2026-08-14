@@ -29,6 +29,20 @@
       "when": 1786732436801,
       "tag": "0003_sturdy_giant_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786734172526,
+      "tag": "0004_same_cammi",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786734424545,
+      "tag": "0005_abnormal_gravity",
+      "breakpoints": true
     }
   ]
 }
