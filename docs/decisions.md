@@ -75,3 +75,45 @@
 **Decision:** Neither `zod` nor a test runner (Vitest) is installed this slice.
 **Alternatives:** Installing both now "to be ready" (rejected — nothing in this slice validates a runtime boundary or has logic worth unit testing yet; per the coding conventions, no premature abstraction/tooling).
 **Consequence:** `zod` lands in slice 2 (ingestion validation), a test runner in slice 4 (correlation, "unit tested") / slice 9 (failure tests).
+
+## 2026-08-14 — Ingestion route path: restaurant_id from the URL, not the body
+
+**Context:** The brief specifies `POST /restaurants/{restaurantId}/events`. `restaurant_id` could be accepted in the request body too, requiring either a mismatch check against the path or trusting one over the other silently.
+**Decision:** `restaurant_id` comes only from the route path (`src/app/api/restaurants/[restaurantId]/events/route.ts`), dropped from the request body schema entirely.
+**Alternatives:** Accepting `restaurant_id` in both places and 400ing on mismatch (rejected — one source of truth is simpler than a validation rule guarding against a state that dropping the field makes impossible).
+**Consequence:** No mismatch state to test or explain. `normalizeEvent`/`enqueueEvent` take `restaurantId` as an explicit parameter rather than reading it off the parsed body.
+
+## 2026-08-14 — issue_class is a genuine root-cause taxonomy, not a copy of event_type
+
+**Context:** The first draft of the ingestion design derived `issue_class` from `event_type` with no transformation for 3 of 4 event types (`delivery_delay`, `refund`, `negative_review` all defaulted straight through), and no CHECK constraint — flagged mid-review as two columns holding identical strings, which any reviewer would notice.
+**Decision:** `issue_class` gets its own CHECK constraint (`IN ('delivery_delay', 'complaint', 'refund', 'negative_review', 'missing_items', 'wrong_order')`) and a derivation rule that genuinely differs from `event_type`: `complaint.category` and `refund.reason` (a shared `IssueCategory` enum: `missing_items` | `wrong_order` | `late_delivery` | `other`) override the default when present and not `'other'`. Concretely: **a refund with `reason: 'late_delivery'` gets `issue_class = 'delivery_delay'`, not `'refund'`** — verified against a real request, `SELECT`ed back from the DB. `negative_review` stays a deliberate pass-through (no structured root-cause field in this slice's minimal payload) rather than an oversight.
+**Alternatives:** Keeping it a documented pass-through/extension point with no CHECK constraint (rejected — slice 4's recurrence-based priority rules are more useful counting by root cause than by event mechanism: a restaurant with 2 late deliveries and 1 refund-for-lateness is 3 lateness incidents, not 2-and-1 unrelated ones).
+**Consequence:** `deriveIssueClass.ts` branches only on `event_type` and the explicit `category`/`reason` field — never on `complaint_text`/`review_text`/`rating`. Worth recording verbatim, as the clearest statement of this boundary so far, for reuse in the architecture doc: **the invariant-1 boundary is about what kind of input drives `issue_class`, not just whether an LLM is involved** — a "helpful" keyword classifier on free text would still violate it even without touching `src/lib/llm/`. A comment stating this lives directly in `deriveIssueClass.ts`, not only here.
+
+## 2026-08-14 — Duplicate response returns the existing row's id; no-write lookup via UNION ALL, not DO UPDATE
+
+**Context:** Invariant 4 requires the UI to visibly show a duplicate was recognized. A bare `duplicate: true` boolean doesn't let the UI link to what it's a duplicate *of* — the more useful answer is "this event already exists, here's what it's attached to," and slice 6 needs an id to link either way. The first attempt to get the existing row's `id` on a conflict used the standard Postgres upsert-discrimination trick, `ON CONFLICT ... DO UPDATE SET restaurant_id = events.restaurant_id RETURNING id, (xmax = 0) AS inserted` — caught in review before implementation: this still writes a new row version on every duplicate (bumps `xmax`, takes a row lock, creates a dead tuple), which breaks `events`' documented immutability. The actual failure test here is "submit the same event five times," which would produce five row versions of a row meant to never be touched again, and concurrent duplicates would serialize on each other's row lock for no reason.
+**Decision:** Kept `ON CONFLICT (restaurant_id, event_id) DO NOTHING` (zero writes on conflict, same as slice 1) and added a `UNION ALL` fallback branch in the same statement — a plain, lock-free `SELECT` of the existing row, gated by `NOT EXISTS (SELECT 1 FROM new_event)` so it only runs on the duplicate path:
+```sql
+SELECT id, true AS inserted FROM new_event
+UNION ALL
+SELECT id, false AS inserted FROM events
+WHERE restaurant_id = $1 AND event_id = $2 AND NOT EXISTS (SELECT 1 FROM new_event);
+```
+Response contract: `201` new / `200` duplicate, both bodies now carry `id` — the *existing* row's id on a duplicate. Verified against real requests: resubmitting the same `(restaurantId, event_id)` returns the identical `id` as the original insert, with zero new `events`/`event_jobs` rows created.
+**Alternatives:** The `DO UPDATE` self-assignment trick (rejected, as above — correctness bug, not just a stylistic choice); a second round-trip query only on the duplicate path (rejected — the `UNION ALL` gets the same result in one statement, preserving invariant 3's single-statement guarantee).
+**Consequence:** `enqueueEvent` always returns `{ id, duplicate }` uniformly. The query is a few lines longer than plain `DO NOTHING`, but the `NOT EXISTS` guard keeps the lookup branch a no-op read on the (overwhelmingly common) non-duplicate path.
+
+## 2026-08-14 — occurred_at bounded to protect the rolling correlation window
+
+**Context:** `occurred_at` drives slice 1's rolling correlation window (`last_event_at >= occurred_at - 3h`). Caught in review: an unvalidated, unbounded `occurred_at` — e.g. a client error placing it a year in the future — would create a `findings` row whose `last_event_at` is also far in the future. That finding's window never lapses, so `closed_at` never gets set, and `UNIQUE(restaurant_id) WHERE closed_at IS NULL` means it silently swallows every subsequent real event at that restaurant into itself, forever.
+**Decision:** Reject `occurred_at` more than 5 minutes ahead or more than 7 days behind the server clock, at Zod validation time, with a clear message. Verified against a real request (`occurred_at` one year out → `400`, no row created).
+**Alternatives:** No bound (rejected — this is what surfaced the bug above); a much wider or narrower window (5 min / 7 days chosen as generous enough for real clock skew and backfill while still bounding the blast radius of a bad timestamp; not tuned further, since nothing yet depends on the exact figures).
+**Consequence:** This is input validation protecting a downstream correctness invariant, not generic hygiene — worth being explicit about in the architecture doc, since the connection (a timestamp bound protects a queue-closing constraint two tables away) isn't obvious from the schema alone.
+
+## 2026-08-14 — Raw sql CTE via db.execute, and .strict() Zod schemas, for the ingestion boundary
+
+**Context:** Needed to decide how the atomic event+job write is expressed in code, and how strict request validation should be.
+**Decision:** `enqueueEvent` uses `db.execute(sql\`...\`)` with the raw CTE (the same single canonical statement slice 1 already verified), not query-builder composition — there are two data-modifying CTEs plus a `UNION ALL`, which the query builder can't express as one statement anyway, so there's no abstraction to gain. Every Zod object in `src/lib/events/schema.ts` — the top-level discriminated union members and each payload — uses `.strict()`, so unknown fields 400 instead of silently vanishing.
+**Alternatives:** Composing the write via Drizzle's query builder in multiple round trips (rejected — breaks the single-statement atomicity guarantee); non-strict Zod objects (rejected — this is a graded correctness exercise; unknown fields silently dropped is a worse failure mode than a 400 telling the caller their request didn't match).
+**Consequence:** `enqueueEvent.ts` reads as one dense SQL statement with a comment block explaining the non-obvious parts (why `DO NOTHING` not `DO UPDATE`, why `.toISOString()` not a bare `Date` — postgres.js's raw parameter binder needs a string at this layer, unlike through the query builder, which knows the column's type).

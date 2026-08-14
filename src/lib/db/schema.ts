@@ -23,9 +23,10 @@ export const events = pgTable(
     restaurantId: text("restaurant_id").notNull(),
     orderId: text("order_id"),
     eventType: text("event_type").notNull(),
-    // Deterministic only — derived from event_type (+ structured payload
-    // fields) at ingestion. Never set from LLM-extracted free text:
-    // correlation and priority rules depend on it.
+    // Root-cause taxonomy, deliberately independent of event_type (see
+    // deriveIssueClass.ts) — deterministic only, never set from
+    // LLM-extracted free text. Priority/severity rules (slice 4) read it;
+    // correlation does not (findings have no issue_class column).
     issueClass: text("issue_class").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true })
@@ -56,6 +57,13 @@ export const events = pgTable(
     check(
       "events_event_type_check",
       sql`${table.eventType} in ('delivery_delay', 'complaint', 'refund', 'negative_review')`,
+    ),
+    // A root-cause taxonomy independent of event_type, not a copy of it —
+    // e.g. a refund caused by a late delivery classes as 'delivery_delay',
+    // not 'refund'. See src/lib/events/deriveIssueClass.ts.
+    check(
+      "events_issue_class_check",
+      sql`${table.issueClass} in ('delivery_delay', 'complaint', 'refund', 'negative_review', 'missing_items', 'wrong_order')`,
     ),
   ],
 );

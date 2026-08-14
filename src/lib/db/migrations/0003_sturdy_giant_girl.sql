@@ -1,0 +1,1 @@
+ALTER TABLE "events" ADD CONSTRAINT "events_issue_class_check" CHECK ("events"."issue_class" in ('delivery_delay', 'complaint', 'refund', 'negative_review', 'missing_items', 'wrong_order'));

@@ -70,10 +70,33 @@ constraint, the choice, the alternative rejected, the cost._
 <!-- slice: 3 --> _TODO_
 
 ### Transactional outbox
-<!-- slice: 2 --> _TODO_
+<!-- slice: 2 -->
+The `event_jobs` row is written in the same SQL statement as its `events` row — a
+`WITH ... INSERT ... SELECT` CTE, not a separate outbox table with a relay. The
+outbox pattern earns its keep bridging a database and a *separate* broker, where the
+write and the publish can't share a transaction; here the queue is Postgres itself,
+so they always can. This was originally scoped as outbox-plus-relay
+(`docs/decisions.md`, 2026-08-13) and revised once `event_jobs` replaced it
+(2026-08-14) — a relay between two tables in the same database would add a moving
+part and a failure mode without adding any guarantee. The cost: this doesn't
+directly generalize if a second, non-Postgres consumer of the same events shows up
+later — if that happens, `event_jobs` becomes the actual outbox and a relay is added
+at that seam.
 
 ### Idempotency and duplicate handling
-<!-- slice: 2 --> _TODO_
+<!-- slice: 2 -->
+Ingestion idempotency is one constraint: `UNIQUE(restaurant_id, event_id)` on
+`events`, scoped per restaurant rather than global, so two tenants can't collide on
+the same client-supplied `event_id`. A duplicate `POST` resolves in a single
+statement — `ON CONFLICT (restaurant_id, event_id) DO NOTHING` for the insert, with
+a `UNION ALL` fallback that looks up the existing row's `id` with no write and no
+lock when the insert didn't happen — so resubmitting the same event five times
+produces exactly one `events` row, one `event_jobs` row, and zero additional writes
+to either (verified directly against the running database, not just asserted). The
+response is `{status: "accepted", duplicate: boolean, id}` in both the new and
+duplicate cases, so a caller can tell "created" from "already existed" without a
+second request. Worker-side idempotency — checking `event_jobs.status` before
+processing a claimed row — is slice 3's job and isn't built yet.
 
 ### Correlation and finding lifecycle
 <!-- slice: 4 --> _TODO_
@@ -95,8 +118,18 @@ _Answers to the five scenarios in the brief, in the brief's own order._
 
 ### Duplicate delivery
 <!-- OWNER: agent | slice: 2 -->
-_TODO_ — where duplicates are detected, how the worker stays safe on redelivery, how
-duplicate findings are prevented, what the UI shows.
+Duplicates are detected at ingestion by a single unique constraint
+(`UNIQUE(restaurant_id, event_id)` on `events`) — a resubmitted event never creates
+a second `events` or `event_jobs` row. Verified directly: five resubmissions of the
+same event produce one row of each, and the API returns `{status: "accepted",
+duplicate: true, id: <the original row's id>}` on every resubmission after the
+first. Duplicate findings can't arise from this path either, since a duplicate event
+never reaches `event_jobs` at all — there's nothing left for a worker or correlation
+step to double-process. Two parts of this answer aren't built yet, and are out of
+scope until their slices land: worker-side redelivery safety (checking
+`event_jobs.status` before processing a claimed row — slice 3) and what the UI shows
+(slice 6/7) — though the `duplicate` boolean and `id` are already in the response,
+ready for the UI to consume once it exists.
 
 ### Out-of-order events
 <!-- OWNER: agent | slice: 4 -->
