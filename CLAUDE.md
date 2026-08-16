@@ -156,9 +156,10 @@ if time runs out there is always a demoable product.
 10. **Docker Compose** — one-command run. Also verify SIGTERM delivery and graceful
     worker shutdown *inside the Linux container* — Windows never generates SIGTERM,
     so that path is unverified as of slice 3 and can only be exercised here.
-    Also: final visual pass on both palettes, verify text legibility. The light
-    palette shipped contrast-measured but never seen, and some copy still reads
-    poorly — both are open as of the slice-6 layout pass.
+    Also: final visual pass on the palette, verify text legibility. There is one
+    palette — the dark theme was deleted on 2026-08-15, so "both palettes" no
+    longer describes anything. The light palette shipped contrast-measured but
+    never seen, and some copy still reads poorly — both still open.
 11. **README + architecture doc**
 
 ---

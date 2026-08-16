@@ -32,9 +32,9 @@ export default async function Home() {
         Read here, in a Server Component, because the flag is server-side env.
         Worth being precise about what it means: this is what the *web app's*
         environment says, and the process that actually acts on `force_fail_` is
-        the worker. They are separate processes that happen to share one .env
-        under Docker Compose, so the button's presence is a strong hint rather
-        than a guarantee.
+        the worker. They are separate processes that happen to share one
+        environment block under Docker Compose (the `x-app-env` anchor), so the
+        button's presence is a strong hint rather than a guarantee.
       */}
       <FindingsBoard
         initialFindings={findings}

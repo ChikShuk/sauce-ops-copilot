@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && npm run build:worker",
+    "build:worker": "tsc -p tsconfig.worker.json && node scripts/copy-migrations.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

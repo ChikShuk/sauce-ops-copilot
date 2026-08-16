@@ -1,0 +1,26 @@
+# Never let a real .env reach an image layer. Compose supplies the environment;
+# a copied .env would bake a developer's ANTHROPIC_API_KEY into the build.
+.env
+.env.*
+!.env.example
+
+# Reinstalled in the image for the right platform — a Windows/macOS node_modules
+# is not portable into a Linux container.
+node_modules
+dist
+.next
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+.git
+.gitignore
+.claude
+coverage
+tests
+docs
+README.md
+CLAUDE.md
+AGENTS.md
+Dockerfile
+.dockerignore
+docker-compose.yml

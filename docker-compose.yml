@@ -1,3 +1,23 @@
+# `docker compose up` and nothing else. No file to create, no migrate step to
+# remember, no API key: the deterministic fallback writer is the default and the
+# whole product works without a model.
+#
+# To use the real model instead — no file needed for this either:
+#   LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... docker compose up
+
+x-app-env: &app-env
+  # `db` is the compose service name; localhost would be the container itself.
+  DATABASE_URL: postgres://sauce:sauce@db:5432/sauce_ops
+  # The `:-` defaults are what make "no manual configuration" true — an unset
+  # variable resolves silently rather than warning or failing. src/lib/env.ts
+  # maps "" to undefined, so a blank key reads as legitimately absent.
+  LLM_PROVIDER: ${LLM_PROVIDER:-fallback}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # Both demo affordances on, as in .env.example. Off by default in code.
+  ENABLE_DEMO_FAILURE_TRIGGER: "true"
+  ENABLE_PROVIDER_TOGGLE: "true"
+  NODE_ENV: production
+
 services:
   db:
     image: postgres:16-alpine
@@ -16,6 +36,60 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Runs to completion before app or worker start, so a first run cannot meet an
+  # empty schema. A single one-shot service also means two processes can never
+  # race the migrator.
+  migrate:
+    build: .
+    image: sauce-ops-copilot
+    command: ["node", "dist/lib/db/migrate.js"]
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    image: sauce-ops-copilot
+    command: ["node", "node_modules/next/dist/bin/next", "start"]
+    environment: *app-env
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      # node rather than curl: the slim image ships no curl, and adding a
+      # package to run a healthcheck is a dependency for nothing.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build: .
+    image: sauce-ops-copilot
+    command: ["node", "dist/worker/index.js"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # Docker's default, stated rather than assumed: the worker finishes its
+    # in-flight job on SIGTERM and exits well inside this. If it ever needs the
+    # full ten seconds, something is wrong with the shutdown path, not with the
+    # budget — see the README's shutdown drill.
+    stop_grace_period: 10s
 
 volumes:
   pgdata:

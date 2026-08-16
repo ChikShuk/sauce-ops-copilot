@@ -15,18 +15,56 @@ dashboard.
 ## Quick start
 <!-- OWNER: agent | slice: 10 (docker) -->
 
-_TODO_
-
 ```bash
-# target: one command, no manual configuration
 docker compose up
 ```
 
-Then open http://localhost:3000
+Then open http://localhost:3000. That is the whole setup: no file to create, no
+migration step, no API key. Three services come up — Postgres, the Next app, and the
+worker — plus a one-shot `migrate` container that runs to completion before either
+process starts, so a first run cannot meet an empty schema.
 
-**Without an API key:** the system runs end-to-end using the deterministic fallback
-LLM provider. **With a key:** set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic`
-in `.env` for real model-generated summaries.
+**Without an API key:** the system runs end-to-end on the deterministic fallback writer.
+Findings are still correlated, prioritized, evidenced and shown live; only the prose is
+templated rather than model-written. Nothing is stubbed or skipped.
+
+**With a key**, either form works and neither needs a file edit:
+
+```bash
+LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... docker compose up
+# or: cp .env.example .env, add the key, then `docker compose up`
+```
+
+Compose reads `.env` from the project root for variable substitution, so a `.env`
+carrying `LLM_PROVIDER=anthropic` is picked up by the containers even though the file
+itself is never copied into the image (`.dockerignore` keeps it out, so no key is ever
+baked into a layer). Worth knowing in both directions: on a machine that already has a
+`.env`, the containers inherit that provider rather than defaulting to `fallback`.
+
+### Without Docker
+
+Postgres is the only thing worth containerizing on its own; the rest runs on Node 24
+(the version the lockfile is resolved against — npm 10 resolves the `esbuild` conflict
+between `tsx` and `drizzle-kit` differently and `npm ci` refuses).
+
+```bash
+npm ci
+cp .env.example .env          # DATABASE_URL already points at the compose db
+docker compose up -d db
+npm run db:migrate
+npm run dev                   # http://localhost:3000
+npm run worker                # in a second terminal — nothing processes without it
+```
+
+`npm run build && npm start` for the production build instead of `npm run dev`.
+
+One thing this path found, worth stating because of who it would have hit: **`npm ci`
+refused the committed `package-lock.json`** — `esbuild`, which `tsx` depends on, was
+missing from it entirely. Every existing `node_modules` in this project had it, so nothing
+locally ever noticed; `npm ci` installs strictly from the lockfile and will not paper over
+the gap. That is exactly the failure mode a reviewer hits on their first command and the
+author never hits at all, and it was invisible until something did a clean install from
+scratch. The lockfile is now in sync (`npm install --package-lock-only`, purely additive).
 
 **Switching between them without a restart:** the sidebar's **Model** control writes the
 choice to Postgres, which both the web app and the worker read at the point of use, and
@@ -949,6 +987,64 @@ Expected, in order:
 ```
 
 The finding keeps its evidence and priority throughout; only the prose waits.
+
+### The graceful-shutdown drill
+
+`SIGKILL` above is the ungraceful half. `SIGTERM` is the one that happens on every
+deploy, scale-down and `docker compose stop`, and until slice 10 it had never actually
+been exercised: Windows does not generate SIGTERM, so the handler in
+`src/worker/index.ts` was written and unit-tested but never delivered a real signal.
+
+```bash
+docker compose up -d
+# fill the queue so the worker is genuinely mid-drain rather than idle
+docker compose stop worker
+```
+
+Four assertions, and **only the last one proves what the drill is actually about.**
+Log lines and an exit code prove the *process* exited; they say nothing about whether
+the job it was holding reached a disposition. A worker that dropped its in-flight job on
+the floor and exited immediately would satisfy the first three and fail the fourth:
+
+| # | Assertion | Measured |
+|---|---|---|
+| 1 | `worker.shutdown_requested` → `job.succeeded` → `worker.stopped`, in that order | ✓ |
+| 2 | Container exit code is `0`, not `137` | `0` |
+| 3 | Stop completes well inside the 10s grace period | **1619 ms** |
+| 4 | **`SELECT count(*) FROM event_jobs WHERE status = 'processing'` is 0** | **0** |
+
+A `137` or a stop that takes the full ten seconds both mean the same thing — the signal
+never reached the handler and Docker eventually used `SIGKILL`. The usual cause is a
+wrapper in PID 1, which is why nothing here launches through `npm run` and why the
+worker runs compiled JS rather than through `tsx`: both put a process between Docker and
+the handler.
+
+The real run, with 2,950 jobs still queued behind it:
+
+```
+{"msg":"worker.shutdown_requested","signal":"SIGTERM"}
+{"msg":"job.claimed","event_id":"cbd83252-…","attempts":1}
+{"msg":"correlation.completed","finding_id":"bee6c8b5-…","version":45,"priority":"critical"}
+{"msg":"enrichment.completed","finding_id":"bee6c8b5-…","source":"fallback"}
+{"msg":"job.succeeded","event_id":"cbd83252-…"}
+{"msg":"worker.stopped","worker_id":"worker-1-a97a1d65"}
+```
+
+**The 2ms gap between `worker.shutdown_requested` and `job.claimed` is the whole result,
+and it happened by chance.** The signal landed while the loop had already passed its
+`while (!shuttingDown)` check and entered `runJob` — so the claim, the correlation, the
+enrichment *and* the disposition all completed after shutdown was requested, and only then
+did the loop exit. That is the slice-3 decision to check `shuttingDown` between iterations
+rather than aborting mid-job, proven from outside the process at precisely the timing that
+would have exposed it if it were wrong. Two milliseconds earlier and the loop would have
+exited before claiming; a hundred milliseconds later and the job would have finished before
+the signal arrived, and neither run would have shown anything.
+
+Nothing engineered that window — the burst was sized to keep the worker busy, not to hit a
+2ms seam, and repeating the drill will usually land in one of the boring cases. It is worth
+writing down precisely because it cannot be relied on to recur: assertion 4 is what holds
+when the timing is ordinary, and this log is what the assertion is protecting. The remaining
+2,949 jobs stayed `pending` and were drained by the restarted worker.
 
 ### Two things asserted here that no revert can break
 

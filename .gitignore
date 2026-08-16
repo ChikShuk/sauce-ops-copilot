@@ -19,6 +19,8 @@
 
 # production
 /build
+# compiled worker + migrate entry points (tsconfig.worker.json)
+/dist
 
 # misc
 .DS_Store

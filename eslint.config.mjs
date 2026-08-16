@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Compiled worker + migrate output (tsconfig.worker.json). Emitted
+    // CommonJS, so linting it is 100+ no-require-imports errors about code
+    // nobody wrote.
+    "dist/**",
   ]),
 ]);
 

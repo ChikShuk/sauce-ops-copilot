@@ -1,0 +1,30 @@
+{
+  // The two Node entry points, compiled to plain JS for the container.
+  //
+  // The worker deliberately does NOT run through `tsx` in the image. tsx
+  // re-spawns node as a child process, which would make PID 1 a wrapper and
+  // leave SIGTERM depending on tsx forwarding it — so the shutdown drill in the
+  // README would be proving tsx's signal handling rather than the handler in
+  // src/worker/index.ts. `node dist/worker/index.js` puts the handler in PID 1.
+  //
+  // `include` names only the entry points; tsc pulls in the transitive graph
+  // itself. That works because src/lib and src/worker carry no `@/` path
+  // aliases (nothing to rewrite on emit) and no React.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    // node16 rather than the classic "node" resolution: every runtime
+    // dependency (drizzle-orm, postgres, zod, @anthropic-ai/sdk) ships an
+    // `exports` map, and node10 resolution does not read those. Emits CommonJS
+    // because package.json has no "type": "module", which is what lets these
+    // packages resolve through their `require` condition.
+    "module": "node16",
+    "moduleResolution": "node16",
+    "rootDir": "src",
+    "outDir": "dist",
+    // The base config is incremental for the editor; a container build is
+    // one-shot and a stale .tsbuildinfo would be a silent no-op.
+    "incremental": false
+  },
+  "include": ["src/worker/index.ts", "src/lib/db/migrate.ts"]
+}
