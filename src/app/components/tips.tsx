@@ -382,13 +382,17 @@ export const SIMULATOR_TIPS = {
   referenceChronological: (
     <>
       <p>
-        Posts the assignment&apos;s three events in time order: a 35-minute delay, a
-        missing-items complaint 17 minutes later, and a 2★ review 2h15m after that — all
-        on one order.
+        Posts the assignment&apos;s three events in time order: a 42-minute delay, a
+        complaint about the same order 17 minutes later, and a 1★ review 2h15m after
+        that. The payloads are the assignment&apos;s own, verbatim.
       </p>
       <p>
         Expect a single card with three events spanning 135 minutes at <Term>high</Term>{" "}
         priority.
+      </p>
+      <p>
+        Posts to its own restaurant rather than to Target, so this run and the shuffled
+        one stay separate.
       </p>
     </>
   ),
@@ -401,11 +405,12 @@ export const SIMULATOR_TIPS = {
       <p>
         Expect a finding <Term>identical</Term> to the chronological one: same three
         events, same 135-minute window, same priority. Arrival order changes nothing,
-        because correlation keys on the order and the time window rather than on sequence.
+        because correlation keys on the restaurant and the time window rather than on
+        sequence — <Term>order_id</Term> is display-only and never part of matching.
       </p>
       <p>
-        Each run targets its own restaurant so the two cards sit side by side for
-        comparison instead of merging into one.
+        Posts to its own restaurant rather than to Target, so the two cards sit side by
+        side for comparison instead of merging into one.
       </p>
     </>
   ),

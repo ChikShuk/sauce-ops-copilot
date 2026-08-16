@@ -227,7 +227,13 @@ export function SimulatorPanel({
 
       <Group
         title="Reference scenario"
-        note="The assignment's three events. Both buttons converge on an identical finding."
+        // Says where these post, because they are the two buttons that ignore
+        // Target and the only way to discover that was to change Target, click,
+        // and be surprised. They have to own their restaurants: correlation
+        // allows one open finding per restaurant, so a shared target would merge
+        // the two runs into a single six-event finding and the convergence claim
+        // — the whole point of shipping both — would have nothing left to show.
+        note="The assignment's three events, in order and shuffled. Each button posts to its own restaurant and ignores Target, so the two runs stay separate and comparable."
       >
         <Action
           busy={busy === "reference_chronological"}
@@ -249,7 +255,14 @@ export function SimulatorPanel({
         </Action>
       </Group>
 
-      <Group title="Single events" note={`Posted to ${labelRestaurant(restaurantId)}.`}>
+      {/* Related event is the exception and the note says so: it posts to the
+          open finding's restaurant, not to Target, because an event "related to
+          an existing finding" has to land where that finding already is. Its
+          own label names the destination too. */}
+      <Group
+        title="Single events"
+        note={`Posted to ${labelRestaurant(restaurantId)} — except Related event, which goes to the open finding's restaurant.`}
+      >
         <Action
           busy={busy === "delay"}
           icon={<ClockIcon className="size-4" />}
@@ -304,7 +317,13 @@ export function SimulatorPanel({
         </Action>
       </Group>
 
-      <Group title="Defences" note="Both are tested; these buttons make them watchable.">
+      {/* These two do honour Target, so they say the same thing Single events
+          does rather than staying silent — after the group above, silence about
+          the destination is what now reads as "this one ignores it". */}
+      <Group
+        title="Defences"
+        note={`Posted to ${labelRestaurant(restaurantId)}. Both are tested; these buttons make them watchable.`}
+      >
         <Action
           busy={busy === "injection"}
           icon={<ShieldAlertIcon className="size-4" />}
