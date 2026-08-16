@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { writeFallbackEnrichment } from "../../src/lib/llm/fallback";
+import { toSentenceCase } from "../../src/lib/llm/parse";
 import { EXTRACTED_TAGS, MAX_RECOMMENDED_ACTIONS, RECOMMENDED_ACTION_TYPES } from "../../src/lib/llm/schema";
 import type { EnrichmentInput, LabeledEvidence } from "../../src/lib/llm/types";
 
@@ -103,5 +104,20 @@ describe("writeFallbackEnrichment", () => {
     );
     expect(enrichment.issue).toContain("Operational issues");
     expect(enrichment.tags).toEqual(["other"]);
+  });
+
+  // The two writers must produce the same *form* of title, or a finding's
+  // headline changes shape when the model is unavailable — which is the
+  // inconsistency the parse.ts normalizer exists to remove, reintroduced by the
+  // other door. This writer already emits "Late deliveries (3 events)", so it is
+  // pinned by idempotence rather than by routing it through the transform: if it
+  // ever starts emitting a lower-case or period-terminated title, this fails.
+  it("already writes its issue in the form parse.ts normalizes model titles into", () => {
+    for (const issueClass of ["delivery_delay", "missing_items", "negative_review", "unknown_x"]) {
+      const issue = writeFallbackEnrichment(
+        input({ evidence: [evidence({ issueClass })] }),
+      ).issue;
+      expect(toSentenceCase(issue)).toBe(issue);
+    }
   });
 });

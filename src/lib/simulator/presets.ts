@@ -57,9 +57,16 @@ function anchorFrom(now: Date): Date {
 }
 
 /**
- * The brief's worked example: a delay, a complaint about a different order, and
- * a bad review, spanning 2h15m — inside the 3-hour correlation window, so all
- * three converge on one finding.
+ * The brief's worked example: a 42-minute delay and a complaint, both on
+ * order_5001, then an unrelated one-star review — spanning 2h15m, inside the
+ * 3-hour correlation window, so all three converge on one finding at `high`.
+ *
+ * **The payloads are the brief's, verbatim.** Delay minutes, rating and both
+ * pieces of customer text are copied from the PDF rather than paraphrased,
+ * because the only reason this preset exists is so a reviewer can put the card
+ * next to the assignment and see the same numbers. They drifted to paraphrase
+ * once (35 minutes, a 2-star review, shortened text) and nothing caught it;
+ * `tests/unit/simulatorPresets.test.ts` now pins each value literally.
  *
  * Offsets rather than absolute times, because the simulator anchors them to
  * `now` while `tests/integration/correlation.reference.test.ts` anchors them to
@@ -72,21 +79,31 @@ export const REFERENCE_SCENARIO = [
     minutesBefore: 135,
     orderId: "order_5001",
     eventType: "delivery_delay",
-    payload: { delay_minutes: 35 },
+    payload: { delay_minutes: 42 },
   },
   {
     label: "complaint 18:12",
     minutesBefore: 118,
     orderId: "order_5001",
     eventType: "complaint",
-    payload: { complaint_text: "fries were missing", category: "missing_items" },
+    // No `category`, deliberately: the brief's payload carries only the message,
+    // and this preset exists so a reviewer can compare the card against the PDF.
+    // An extra field breaks that comparison at the one place it matters.
+    //
+    // The side effect is the better demonstration. issue_class derives to
+    // `complaint` from event_type alone, so "the fries were missing" reaches the
+    // card only through the model's extracted_tags — one event showing both
+    // halves of the boundary at once, structured fields to correlation and free
+    // text to the model. The dedicated "Customer complaint" button below is where
+    // the structured taxonomy split is demonstrated.
+    payload: { complaint_text: "My order arrived late and the fries were missing." },
   },
   {
     label: "negative_review 20:10",
     minutesBefore: 0,
     orderId: null,
     eventType: "negative_review",
-    payload: { rating: 2, review_text: "slow and wrong" },
+    payload: { rating: 1, review_text: "Second time this week items were missing." },
   },
 ] as const;
 

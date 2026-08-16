@@ -641,6 +641,15 @@ Worked example, arriving in the worst order — review (20:10) first, then the d
 to 17:55; the complaint lands inside the interval and attaches. One finding, three
 evidence rows. Verified through the real API and worker, not just in tests.
 
+Re-verified on the Docker image rather than only in development: both reference buttons
+were clicked against `docker compose up` and converged — identical finding shape, evidence,
+priority and drivers, differing only in the prose and the restaurant they were posted to.
+The two buttons deliberately target different restaurants, because correlation allows one
+open finding per restaurant and a shared target would merge them into a single six-event
+finding, making the two orders appear *not* to converge. Both events' payloads are the
+brief's own, verbatim — a 42-minute delay, a one-star review, and both pieces of customer
+text — so the card can be read side by side with the assignment.
+
 Honest limitation: two backfills minutes apart, arriving while a live finding is open,
 each get their own closed finding rather than correlating with each other. The brief's
 out-of-order case is events minutes apart, not week-old replays, so this is documented
@@ -771,7 +780,7 @@ Three things I'd do with that data. Run prompt changes against the flagged set a
 
 ```bash
 docker compose up -d db
-npm test                      # 337 tests: 17 unit files, 18 integration files
+npm test                      # 347 tests: 17 unit files, 18 integration files
 npm run test:unit             # pure functions, no database
 npm run test:integration      # real Postgres, real SQL, no mocked queries
 ```

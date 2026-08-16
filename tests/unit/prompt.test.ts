@@ -169,3 +169,15 @@ describe("prompt containment of a hostile complaint", () => {
     expect(systemAndUser.user).not.toContain("E99:");
   });
 });
+
+describe("the system prompt states the issue's form", () => {
+  // parse.ts enforces this and would hold on its own. The rule is here so the
+  // model produces the right form naturally and the normalizer is a no-op in the
+  // common case — code silently correcting a model that was told nothing is a
+  // worse arrangement than the two agreeing. This asserts they still agree.
+  it("asks for sentence case with no trailing full stop", () => {
+    const system = buildPrompt(input()).system;
+    expect(system).toMatch(/sentence case/i);
+    expect(system).toMatch(/no full stop/i);
+  });
+});

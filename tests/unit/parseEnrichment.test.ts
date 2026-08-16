@@ -109,4 +109,54 @@ describe("parseEnrichment", () => {
     const parsed = parseEnrichment(response({ cited_labels: [] }), new Map());
     expect(parsed.citedEventIds).toEqual([]);
   });
+
+  // The card's headline varied run to run — "late delivery with missing items"
+  // one time, "Late delivery with missing items" the next — because nothing
+  // specified a form. The prompt now asks for one; this is what guarantees it,
+  // since a prompt rule is a mitigation (docs/decisions.md, 2026-08-16).
+  describe("issue is normalized to one form", () => {
+    it("capitalizes a lower-case first word", () => {
+      const parsed = parseEnrichment(response({ issue: "late delivery with missing items" }), labels);
+      expect(parsed.issue).toBe("Late delivery with missing items");
+    });
+
+    it("strips a trailing period", () => {
+      const parsed = parseEnrichment(response({ issue: "Repeated missing items." }), labels);
+      expect(parsed.issue).toBe("Repeated missing items");
+    });
+
+    it("leaves an already-correct issue untouched", () => {
+      const parsed = parseEnrichment(response({ issue: "Repeated missing items" }), labels);
+      expect(parsed.issue).toBe("Repeated missing items");
+    });
+
+    // The reason this only touches the first character. Lowercasing the rest
+    // would look more thorough and would quietly destroy every acronym and
+    // proper noun the model legitimately uses.
+    it("preserves acronyms and proper nouns after the first word", () => {
+      const parsed = parseEnrichment(
+        response({ issue: "repeated SLA breaches on DoorDash orders" }),
+        labels,
+      );
+      expect(parsed.issue).toBe("Repeated SLA breaches on DoorDash orders");
+    });
+
+    // A period ends a sentence; these carry meaning, and a noun phrase that
+    // genuinely ends in one is not the defect being fixed.
+    it("keeps a trailing question or exclamation mark", () => {
+      expect(parseEnrichment(response({ issue: "Missing items again?" }), labels).issue).toBe(
+        "Missing items again?",
+      );
+      expect(parseEnrichment(response({ issue: "Missing items again!" }), labels).issue).toBe(
+        "Missing items again!",
+      );
+    });
+
+    it("is idempotent", () => {
+      const once = parseEnrichment(response({ issue: "late deliveries." }), labels).issue;
+      const twice = parseEnrichment(response({ issue: once }), labels).issue;
+      expect(twice).toBe(once);
+      expect(once).toBe("Late deliveries");
+    });
+  });
 });

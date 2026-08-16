@@ -89,6 +89,40 @@ describe("simulator presets: the reference scenario reproduces the brief", () =>
     expect(REFERENCE_SCENARIO.map((spec) => spec.minutesBefore)).toEqual([135, 118, 0]);
   });
 
+  // Transcribed from the assignment PDF and written out literally on purpose.
+  // Deriving them from REFERENCE_SCENARIO would make this test read the very
+  // source it is checking, which pins nothing — and that is exactly how a
+  // 35-minute delay, a 2-star review and two paraphrased sentences survived
+  // until someone put the card next to the PDF. `toEqual` on the whole payload
+  // rather than field-by-field, so a re-added `category` fails here too: the
+  // brief's complaint carries only the message.
+  it("posts the brief's payloads verbatim", () => {
+    const posts = buildReferenceScenario(RESTAURANT, "chronological", NOW);
+
+    expect(posts[0].body.event_type).toBe("delivery_delay");
+    expect(posts[0].body.payload).toEqual({ delay_minutes: 42 });
+
+    expect(posts[1].body.event_type).toBe("complaint");
+    expect(posts[1].body.payload).toEqual({
+      complaint_text: "My order arrived late and the fries were missing.",
+    });
+
+    expect(posts[2].body.event_type).toBe("negative_review");
+    expect(posts[2].body.payload).toEqual({
+      rating: 1,
+      review_text: "Second time this week items were missing.",
+    });
+  });
+
+  // The brief's complaint has no structured category, so the deterministic path
+  // can only class it by event_type. "the fries were missing" then reaches the
+  // card through the model's extracted_tags and nowhere else — one event
+  // demonstrating both halves of the boundary, which is why the field stays out.
+  it("classes the complaint by event_type alone, leaving the text to the model", () => {
+    const body = buildReferenceScenario(RESTAURANT, "chronological", NOW)[1].body;
+    expect(deriveIssueClass(body)).toBe("complaint");
+  });
+
   it("spans less than the correlation window, so all three converge", () => {
     const offsets = REFERENCE_SCENARIO.map((spec) => spec.minutesBefore);
     const spanMs = (Math.max(...offsets) - Math.min(...offsets)) * 60_000;
