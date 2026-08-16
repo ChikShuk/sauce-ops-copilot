@@ -120,14 +120,14 @@ flowchart TD
 
     DB -->|"SELECT … FOR UPDATE SKIP LOCKED"| W["Worker process"]
 
-    W --> CORR["Correlation<br/><i>deterministic</i>"]
-    CORR --> PRI["Priority rules<br/><i>deterministic</i>"]
+    W --> CORR["Correlation<br/>deterministic"]
+    CORR --> PRI["Priority rules<br/>deterministic"]
     PRI -->|"finding + evidence + priority<br/>+ drivers COMMITTED"| DB
 
     PRI --> ENR["Enrichment"]
     ENR -->|"evidence as opaque labels E1..En"| LLM["Anthropic<br/>claude-sonnet-5"]
     LLM -->|"structured output"| VAL{"Schema · allowlist ·<br/>citations valid?"}
-    VAL -->|yes| WRITE["prose, actions, tags, citations<br/><i>fenced on findings.version</i>"]
+    VAL -->|yes| WRITE["prose, actions, tags, citations<br/>fenced on findings.version"]
     VAL -->|"no — 1 regeneration, then give up"| FB["Deterministic fallback writer"]
     ENR -.->|"timeout / outage"| FB
     FB --> WRITE
