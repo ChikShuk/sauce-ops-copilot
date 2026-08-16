@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+import { POST } from "../../src/app/api/restaurants/[restaurantId]/events/route";
 import { db } from "../../src/lib/db/client";
 
 // Every test gets its own restaurant. restaurant_id is the schema's own
@@ -20,6 +21,36 @@ import { INJECTION_COMPLAINT_TEXT } from "../../src/lib/simulator/presets";
 
 export function injectionComplaintPayload(): Record<string, unknown> {
   return { complaint_text: INJECTION_COMPLAINT_TEXT, category: "missing_items" };
+}
+
+export type IngestResponse = {
+  status: number;
+  body: { status?: string; duplicate?: boolean; event_id?: string; id?: string; error?: string };
+};
+
+/**
+ * Posts an event through the real route handler.
+ *
+ * App Router handlers are plain (Request, context) => Response functions, so
+ * this needs no server — and going through the handler rather than calling
+ * enqueueEvent directly is the point: the duplicate response an operator's
+ * browser actually sees is the status code and the `duplicate` flag, and
+ * neither is produced anywhere else.
+ */
+export async function postEvent(
+  restaurantId: string,
+  body: unknown,
+): Promise<IngestResponse> {
+  const res = await POST(
+    new Request(`http://test.local/api/restaurants/${restaurantId}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    { params: Promise.resolve({ restaurantId }) },
+  );
+
+  return { status: res.status, body: await res.json() };
 }
 
 export type SeedEvent = {

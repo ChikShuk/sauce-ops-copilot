@@ -160,8 +160,8 @@ Every field on a finding, and who writes it:
 The model never decides what is true, only how it reads. Take the model away entirely and
 a finding still has its evidence, its priority, the reason for that priority, and a
 usable summary — the prose just gets flatter. That is the property the whole split exists
-to buy, and it is what the two failure tests in `tests/integration/enrichment.test.ts`
-assert.
+to buy, and it is what the three failure tests in `tests/integration/enrichment.test.ts`
+assert — the provider being down, the model returning nonsense, and the call timing out.
 
 One consequence worth stating plainly: `issue_class` is derived from structured fields
 only (`event_type`, plus an explicit `category`/`reason`), never from free text. A
@@ -571,8 +571,14 @@ either way.
 
 ### Redis and temporary state
 <!-- OWNER: design-chat -->
-_TODO_ — we don't use Redis. State the question they asked and answer it: nothing
-breaks, nothing is lost, because no permanent business data lives outside Postgres.
+
+There is no Redis in this system, so the question has a short answer: nothing breaks if it's flushed, because nothing depends on it.
+
+That was a deliberate call rather than an omission. The brief warns against adding Redis to satisfy the assignment, and every job Redis would have done here is done by Postgres. The queue is a table claimed with SELECT ... FOR UPDATE SKIP LOCKED. Idempotency is a unique constraint. The "one open finding per restaurant" invariant is a partial unique index. Concurrency control is row locks and constraint violations. All of it lives in the same transactional boundary as the business data it protects, which is precisely the property that makes the partial-failure story work — an event and its job row are written in one statement, so "saved but never queued" isn't recoverable, it's impossible.
+
+The one place a cache genuinely exists is the SSE broadcaster's in-memory board snapshot, and it's worth naming because it taught me something. It's process-local, rebuilt from Postgres every second, and holds nothing that isn't derivable. Losing it costs one poll interval. But during slice 6 that cache was being served to newly-connecting clients — so a browser that disconnected and returned could see a finding as accepted that the worker had already marked failed. The bug wasn't the cache, it was trusting it at a moment when it could be stale. subscribe() now always reads fresh, and there's a test that mutates the database while nobody is subscribed.
+
+If I were adding Redis later, it would be for things Postgres is genuinely worse at rather than for the ones it handles fine: per-tenant rate limiting and LLM spend counters, where the write volume is high and losing a few seconds of counter state on a flush is acceptable. Those are exactly the mechanisms listed as missing under traffic-spike handling — and notably, they're also the only ones where "permanently lost on flush" is a tolerable answer.
 
 ---
 
@@ -592,7 +598,166 @@ Three things I'd do with that data. Run prompt changes against the flagged set a
 ## Failure tests
 <!-- OWNER: agent | slice: 9 -->
 
-_TODO_ — list each test, what it proves, and how to run it.
+```bash
+docker compose up -d db
+npm test                      # 266 tests: 13 unit files, 15 integration files
+npm run test:unit             # pure functions, no database
+npm run test:integration      # real Postgres, real SQL, no mocked queries
+```
+
+The integration suite **refuses to run while a worker is consuming from the same
+database**. `claimJob` takes the oldest eligible job in the table regardless of who
+queued it, so a stray `npm run worker` steals jobs from the tests — and it doesn't fail
+cleanly, it fails a *different* assertion on each run, each one plausible enough to look
+like a real bug. `tests/setup.integration.ts` queues a canary job, waits two poll
+intervals, and aborts the run by name if anything claimed it. That guard was written
+because this happened during slice 9, not in anticipation of it.
+
+### What each scenario is covered by
+
+| Scenario | Test | What it proves |
+|---|---|---|
+| Submit the same event five times | `integration/ingestionDedup.test.ts` | Five POSTs to the real route handler → `201 duplicate:false` once, `200 duplicate:true` four times, all returning the same id; one `events` row, one `event_jobs` row, one finding, one evidence row, **one LLM call** through `runJob`. Also: the same `event_id` at a different restaurant is a different event, since the constraint is on the pair. |
+| Kill the worker mid-processing and restart | `integration/workerCrash.test.ts` | A claim that never receives a disposition — which is exactly what `SIGKILL` leaves in `event_jobs`. Covers: the job is *not* reclaimable before `PROCESSING_TIMEOUT_MS`; it is reclaimed after, with a fresh `claim_token` and an incremented attempt; the dead worker's late `markSucceeded`/`markFailed` update zero rows and log `job.disposition_superseded`; the restarted worker finishes the job; and a job that crash-loops dead-letters *at claim* with a diagnosable `last_error` rather than looping forever. |
+| Malformed LLM JSON | `unit/parseEnrichment.test.ts`, `unit/anthropicProvider.test.ts`, `integration/enrichment.test.ts` | Non-JSON, schema violations, fabricated citations and out-of-allowlist action types are all rejected; the provider regenerates exactly once then gives up; the pipeline degrades to the deterministic writer and the finding still reaches `ready`. |
+| LLM timeout | `unit/anthropicProvider.test.ts`, `integration/enrichment.test.ts` | A timeout is **not** regenerated (1 call) while a rejected response **is** (`MAX_LLM_ATTEMPTS` calls) — asserted in the same test so the asymmetry can't read as an accident. End to end, a timeout degrades to fallback and the job is marked **succeeded, not retried**: the degrade already produced evidence, priority and prose. |
+| Concurrent related events | `integration/correlation.concurrency.test.ts` | Six concurrent events for one restaurant produce one finding holding all six, with no lost version updates; a forced `23505` proves the create-race retry actually runs, by asserting on the `correlation.insert_race_retry` log rather than on final state that would look identical either way. |
+| Out-of-order delivery | `integration/correlation.reference.test.ts` | All six permutations of the brief's three-event scenario converge on the same finding, the same evidence, and the same first/last event timestamps. |
+| Prompt injection in customer text | `unit/prompt.test.ts`, `unit/llmSchema.test.ts`, `integration/promptInjection.test.ts` | Hostile text is fenced as data and can't escape; fabricated citations and unknown action types are rejected; and when the model is made to *obey* the injection, every variant lands on the fallback path with priority, evidence and the stored complaint text untouched. |
+| Disconnect the dashboard and reconnect | `integration/sseStream.test.ts`, `integration/broadcaster.test.ts` | A client disconnects while the model is still running and reconnects after it finished; the **first frame** of the new connection shows `ready`. Aborting the request closes the stream rather than leaking the subscription. |
+| Refresh mid-processing | `integration/firstPaint.test.ts` | A cold `currentBoard()` load during processing renders as *Analyzing* with a placeholder, never a blank card — and is byte-identical to the first frame the live stream would have sent, so a refresh can't flicker between two different truths. |
+| Retry schedule and permanent failure | `unit/backoff.test.ts`, `integration/deadLetterFinding.test.ts` | The 1s/2s/4s/8s ladder and its five-minute cap; a job that exhausts its budget dead-letters, its finding is marked `failed`, and its evidence and priority survive intact. |
+| **Flush Redis** | — | Not applicable: there is no Redis. See [Redis and temporary state](#redis-and-temporary-state) for the answer to what that means. |
+
+### Proving the tests fail when the bug returns
+
+Coverage says a line executed. It does not say an assertion would have noticed. This
+project has been bitten three times by the difference: a slice-4 retry path that never
+fired, a slice-6 cache that served a stale board, and a `waitForNext` test helper whose
+"a message already arrived" branch was dead code (`const before = messages.length;
+if (messages.length > before)`) — all three sat inside passing, covered tests.
+
+So each load-bearing test was verified by putting the bug back and confirming it goes
+red. The four reverts below were run against this commit; the output is what the run
+actually printed.
+
+**1. Remove the staleness predicate from `claimJob`** — make any `processing` job
+claimable by the next worker that asks:
+
+```diff
+-        OR (status = 'processing'
+-            AND claimed_at < now() - make_interval(secs => ${PROCESSING_TIMEOUT_MS / 1000}))
++        OR (status = 'processing')
+```
+```
+ ❯ tests/integration/workerCrash.test.ts (6 tests | 1 failed)
+   × does not release its job before the processing timeout has passed
+   AssertionError: expected { …(5) } to be null
+      Tests  1 failed | 5 passed (6)
+```
+The other five passed. That is the point of the negative control: every test that
+*backdates* a claim would still pass against a `claimJob` that had no staleness
+condition at all, because the backdate would be doing nothing. Only the test asserting
+a fresh claim is **un**claimable can tell the difference.
+
+**2. Restore the slice-6 cache** — serve the frozen board to a reconnecting client:
+
+```diff
+-  const { state } = await readBoard(null);
++  const state = instance.state ?? (await readBoard(null)).state;
+```
+```
+ ❯ tests/integration/broadcaster.test.ts (4 tests | 2 failed)
+   × shows a reconnecting client what changed while nobody was listening
+   × pushes an update when a finding changes, naming what moved
+ ❯ tests/integration/sseStream.test.ts (4 tests | 2 failed)
+   × shows a client that disconnected mid-processing the finished state when it returns
+   × serves a later connection correctly after an earlier one was aborted
+   AssertionError: expected [ { …(21) } ] to have a length of 2 but got 1
+      Tests  4 failed | 4 passed (8)
+```
+These assertions are all on the **first** frame after reconnecting. Asserting on a
+later frame would pass with the bug restored, because the poller refreshes the stale
+board a second afterwards — the bug is only visible in the first thing a reconnecting
+client is handed.
+
+**3. Drop `ON CONFLICT DO NOTHING` from `enqueueEvent`** — let the duplicate insert
+raise instead:
+
+```diff
+-      ON CONFLICT (restaurant_id, event_id) DO NOTHING
+       RETURNING id
+```
+```
+ ❯ tests/integration/ingestionDedup.test.ts (4 tests | 1 failed)
+   × accepts every copy but creates the work exactly once
+   AssertionError: expected 500 to be 200
+      Tests  1 failed | 3 passed (4)
+```
+The second test — one finding, one evidence row, one LLM call — **still passed**, because
+a duplicate rejected with a 500 also leaves exactly one row and spends exactly one call.
+Row counts alone cannot distinguish "recognized the duplicate" from "crashed on the
+duplicate". The status code is what carries that assertion, and it's also what the UI
+shows the operator.
+
+**4. Restore the dead condition in the `waitForNext` helper:**
+
+```diff
+-    if (cursor >= messages.length) {
++    const before = messages.length;
++    if (messages.length > before) return messages[messages.length - 1];
+```
+```
+ ❯ tests/unit/collector.test.ts (4 tests | 2 failed)
+   × returns a message that arrived before waitForNext was called
+   × hands back messages in arrival order, not just the latest
+   Error: no board message arrived
+      Tests  2 failed | 2 passed (4)
+```
+A helper that waits for the *next* message instead of returning the one already
+delivered turns a race into a five-second hang, or into a pass that asserted on the
+wrong message. It had been in the suite since slice 6, passing, because the board poller
+happened to tick after every call.
+
+### The kill-and-restart drill
+
+The automated proof above models the kill as an undelivered disposition, which is what
+the database actually sees. The real thing is a drill rather than a test — a spawned and
+`SIGKILL`ed worker on Windows is slow and flaky, and a flaky test proves less than an
+absent one:
+
+```bash
+docker compose up -d
+# POST an event, then within PROCESSING_TIMEOUT_MS (45s):
+docker compose kill -s SIGKILL worker
+docker compose up -d worker
+docker compose logs -f worker
+```
+
+Expected, in order:
+
+```
+{"msg":"job.claimed","event_id":"…","attempts":1,…}     # before the kill
+{"msg":"job.claimed","event_id":"…","attempts":2,…}     # reclaimed ~45s later
+{"msg":"job.succeeded","event_id":"…",…}
+```
+
+The finding keeps its evidence and priority throughout; only the prose waits.
+
+### Two things asserted here that no revert can break
+
+`tests/unit/configInvariants.test.ts` asserts
+`PROCESSING_TIMEOUT_MS > LLM_TIMEOUT_MS * MAX_LLM_ATTEMPTS`. Since the constant is
+currently *derived* from that expression, the assertion passes trivially and cannot
+fail today. It is a drift-catcher, not a bug-finder, and it is listed here as one: it
+fires only if someone replaces the derivation with a literal or raises the LLM timeout
+without looking at what depends on it. The consequence of losing that relationship is
+not a compile error — it is a healthy worker having its job reclaimed mid-call.
+
+And the SSE teardown test asserts the stream *closes* on abort, which is observable.
+That the subscription was also removed from the poller is not observable from outside
+the process; the test asserts the closure and a subsequent connection still being served
+correctly, which is as far as a black-box assertion reaches.
 
 ---
 

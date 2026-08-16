@@ -1,50 +1,18 @@
 import { sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "../../src/lib/db/client";
-import { subscribe, type BoardMessage } from "../../src/lib/realtime/broadcaster";
+import { subscribe } from "../../src/lib/realtime/broadcaster";
 import { processEvent } from "../../src/worker/processEvent";
 import { eventRowById as eventRow, resetDb } from "../helpers/db";
 import { newRestaurantId, seedEvent } from "../helpers/factories";
 import { stubProvider } from "../helpers/providers";
+import { collector } from "../helpers/sse";
 
 const AT = new Date("2026-08-14T20:10:00Z");
 
 beforeEach(async () => {
   await resetDb();
 });
-
-// Collects everything the broadcaster pushes, and lets a test wait for the
-// next one rather than sleeping past the poll interval and hoping.
-function collector() {
-  const messages: BoardMessage[] = [];
-  let notify: (() => void) | null = null;
-
-  const listener = (message: BoardMessage) => {
-    messages.push(message);
-    notify?.();
-  };
-
-  async function waitForNext(timeoutMs = 5_000): Promise<BoardMessage> {
-    const before = messages.length;
-    if (messages.length > before) return messages[messages.length - 1];
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("no board message arrived")),
-        timeoutMs,
-      );
-      notify = () => {
-        clearTimeout(timer);
-        notify = null;
-        resolve();
-      };
-    });
-
-    return messages[messages.length - 1];
-  }
-
-  return { messages, listener, waitForNext };
-}
 
 async function ingest(restaurantId: string, occurredAt = AT) {
   const event = await seedEvent({ restaurantId, occurredAt });
@@ -113,7 +81,11 @@ describe("broadcaster", () => {
     const unsubscribe = await subscribe(sink.listener);
 
     try {
-      const findingId = sink.messages[0].findings[0].id;
+      // Consumed through waitForNext, not by indexing messages: the connect
+      // board is a message like any other, and reading it off the array while
+      // the cursor still points at it would make the next wait return it again.
+      const connected = await sink.waitForNext();
+      const findingId = connected.findings[0].id;
 
       await db.execute(sql`
         UPDATE findings SET status = 'failed' WHERE id = ${findingId};
@@ -135,7 +107,7 @@ describe("broadcaster", () => {
     const unsubscribe = await subscribe(sink.listener);
 
     try {
-      expect(sink.messages[0].queue.retrying).toBe(0);
+      expect((await sink.waitForNext()).queue.retrying).toBe(0);
 
       // next_attempt_at in the future, which is what a job waiting out its
       // backoff actually looks like — and also keeps a worker that happens to

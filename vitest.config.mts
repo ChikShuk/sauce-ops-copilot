@@ -1,9 +1,19 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+// Slice 9's tests import the API route handlers directly, and those use the
+// "@/..." alias that Next resolves from tsconfig paths. Vitest does not read
+// tsconfig paths, so the alias is declared once here and shared by both
+// projects — without it, importing a route fails at resolve time.
+const alias = {
+  "@": fileURLToPath(new URL("./src", import.meta.url)),
+};
 
 export default defineConfig({
   test: {
     projects: [
       {
+        resolve: { alias },
         test: {
           name: "unit",
           environment: "node",
@@ -11,6 +21,7 @@ export default defineConfig({
         },
       },
       {
+        resolve: { alias },
         test: {
           name: "integration",
           environment: "node",

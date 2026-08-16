@@ -1,10 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { correlateEvent } from "../../src/lib/correlation/correlateEvent";
 import { enrichFinding } from "../../src/lib/llm/enrichFinding";
 import { processEvent } from "../../src/worker/processEvent";
-import { eventRowById as eventRow, evidenceFor, findingsFor } from "../helpers/db";
-import { newRestaurantId, seedEvent } from "../helpers/factories";
-import { failingProvider, rawTextProvider, stubProvider } from "../helpers/providers";
+import { runJob } from "../../src/worker/runJob";
+import { eventRowById as eventRow, evidenceFor, findingsFor, jobFor } from "../helpers/db";
+import { newRestaurantId, postEvent, seedEvent } from "../helpers/factories";
+import {
+  failingProvider,
+  rawTextProvider,
+  stubProvider,
+  timingOutProvider,
+} from "../helpers/providers";
 
 const AT = new Date("2026-08-14T20:10:00Z");
 
@@ -120,6 +127,48 @@ describe("enrichment: failure is survivable", () => {
     const finding = (await findingsFor(restaurantId))[0];
     expect(finding.status).toBe("ready");
     expect(finding.summary_source).toBe("fallback");
+  });
+
+  /**
+   * FAILURE TEST 3 — the model never answers.
+   *
+   * Distinct from "the provider is down" in one way that matters: a timeout is
+   * a *successful* outcome for the job. The degrade already produced everything
+   * the operator needs, so retrying would spend four more LLM budgets to
+   * rewrite prose we already have. This runs through runJob rather than
+   * processEvent because the disposition is the whole claim — and nothing else
+   * in the suite asserts it.
+   */
+  it("degrades on an LLM timeout and marks the job succeeded, not for retry", async () => {
+    const restaurantId = newRestaurantId();
+    const response = await postEvent(restaurantId, {
+      event_id: `evt_${randomUUID()}`,
+      event_type: "delivery_delay",
+      occurred_at: new Date(Date.now() - 60_000).toISOString(),
+      payload: { delay_minutes: 40 },
+    });
+    const eventId = response.body.id;
+    if (eventId === undefined) throw new Error("ingestion returned no id");
+
+    const provider = timingOutProvider();
+
+    // Bounded drain rather than a single call: the queue is global, so this
+    // worker may pick up a row another test left behind before it reaches ours.
+    for (let i = 0; i < 10 && (await jobFor(eventId))?.status === "pending"; i += 1) {
+      await runJob(`worker-${randomUUID().slice(0, 8)}`, provider);
+    }
+
+    const job = await jobFor(eventId);
+    expect(job?.status).toBe("succeeded");
+    expect(job?.attempts).toBe(1);
+    expect(job?.last_error).toBeNull();
+
+    const finding = (await findingsFor(restaurantId))[0];
+    expect(finding.status).toBe("ready");
+    expect(finding.summary_source).toBe("fallback");
+    // The evidence and the priority never depended on the model.
+    expect(finding.priority).not.toBeNull();
+    expect(await evidenceFor(finding.id)).toEqual([eventId]);
   });
 });
 

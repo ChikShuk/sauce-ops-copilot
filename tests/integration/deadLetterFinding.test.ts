@@ -43,9 +43,9 @@ async function enqueue(restaurantId: string, eventId: string): Promise<string> {
 }
 
 // The real schedule is 1s/2s/4s/8s. Waiting it out would make this test 15
-// seconds long for no extra coverage — the backoff arithmetic is unit-tested
-// separately — so pull next_attempt_at forward and let the claim query run for
-// real.
+// seconds long for no extra coverage — the backoff arithmetic is unit-tested in
+// tests/unit/backoff.test.ts — so pull next_attempt_at forward and let the claim
+// query run for real.
 async function makeClaimable(eventId: string): Promise<void> {
   await db.execute(sql`
     UPDATE event_jobs SET next_attempt_at = now() - interval '1 second'

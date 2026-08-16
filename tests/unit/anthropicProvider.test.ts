@@ -13,9 +13,19 @@ vi.mock("@anthropic-ai/sdk", () => ({
       constructorArgs.push(options);
     }
   },
+  // Declared inside the factory because vi.mock is hoisted above the imports.
+  // The real class carries more, but everything the provider can observe about
+  // a timeout is that it is a thrown non-EnrichmentValidationError.
+  APIConnectionTimeoutError: class extends Error {
+    constructor({ message }: { message: string }) {
+      super(message);
+      this.name = "APIConnectionTimeoutError";
+    }
+  },
 }));
 
-import { LLM_TIMEOUT_MS, MAX_LLM_ATTEMPTS } from "../../src/lib/config";
+import { APIConnectionTimeoutError } from "@anthropic-ai/sdk";
+import { LLM_TIMEOUT_MS, MAX_LLM_ATTEMPTS, PROCESSING_TIMEOUT_MS } from "../../src/lib/config";
 import { anthropicProvider } from "../../src/lib/llm/anthropic";
 import type { EnrichmentInput } from "../../src/lib/llm/types";
 
@@ -127,6 +137,48 @@ describe("anthropicProvider", () => {
 
     await expect(anthropicProvider.enrich(input)).rejects.toThrow(/connection reset/);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The timeout case the brief asks about, and the one the suite used to fold
+   * into "the provider is down".
+   *
+   * Nothing downstream distinguishes a timeout from any other throw —
+   * enrichFinding catches everything and degrades — so the only claim worth
+   * asserting here is the one that is distinguishable, and it is a real one:
+   * a timeout must NOT be regenerated. A rejected *response* is regenerated,
+   * because the same request might parse next time. A deadline that already
+   * expired would only expire again, and a second 15s attempt on top of the
+   * first would push a healthy worker past PROCESSING_TIMEOUT_MS and get its
+   * own job reclaimed underneath it.
+   */
+  it("does not regenerate after a timeout, unlike a rejected response", async () => {
+    create.mockRejectedValue(new APIConnectionTimeoutError({ message: "Request timed out." }));
+
+    await expect(anthropicProvider.enrich(input)).rejects.toThrow(/timed out/i);
+    expect(create).toHaveBeenCalledTimes(1);
+
+    // The contrast, in the same test so the asymmetry is impossible to read as
+    // an accident: identical call count would mean the regeneration path had
+    // stopped working, and the assertion above would still pass.
+    create.mockReset();
+    create.mockResolvedValue(message(JSON.stringify({ ...JSON.parse(validBody), cited_labels: ["E99"] })));
+
+    await expect(anthropicProvider.enrich(input)).rejects.toThrow(/E99/);
+    expect(create).toHaveBeenCalledTimes(MAX_LLM_ATTEMPTS);
+  });
+
+  it("keeps the worst case inside the stale-reclaim window", async () => {
+    // One attempt bounded by LLM_TIMEOUT_MS, MAX_LLM_ATTEMPTS of them, no SDK
+    // retries underneath — the three facts PROCESSING_TIMEOUT_MS is computed
+    // from. Asserted together because the arithmetic in config.ts is only
+    // sound if all three hold at once.
+    create.mockResolvedValueOnce(message(validBody));
+    await anthropicProvider.enrich(input);
+
+    expect(create.mock.calls[0][1]).toEqual({ timeout: LLM_TIMEOUT_MS });
+    expect(constructorArgs.at(-1)).toMatchObject({ maxRetries: 0 });
+    expect(LLM_TIMEOUT_MS * MAX_LLM_ATTEMPTS).toBeLessThan(PROCESSING_TIMEOUT_MS);
   });
 
   it("treats a truncated response as regenerable", async () => {
