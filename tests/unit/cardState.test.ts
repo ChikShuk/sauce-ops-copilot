@@ -17,6 +17,7 @@ function card(overrides: Partial<FindingCard> = {}): FindingCard {
     issue: "Repeated late deliveries",
     hasSummary: true,
     summarySource: "llm",
+    llmUsage: { inputTokens: 1_200, outputTokens: 300, costMicrosUsd: 5_400 },
     extractedTags: [],
     eventCount: 3,
     firstEventAt: "2026-08-14T17:55:00.000Z",

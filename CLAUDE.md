@@ -101,7 +101,16 @@ are dropped or regenerated.
 - **SSE** for real-time (one-way server→client; simpler than WebSockets and easier to explain)
 - **Worker** is a separate Node process in the same repo
 - **Docker Compose** — db + app + worker, runs with one command
-- **Tailwind** for styling — no component library, no design system
+- **Tailwind + shadcn/ui** for styling. shadcn is copy-paste: the component code
+  lands in `src/components/ui/` and we own and edit it, so it is a starting point
+  rather than a dependency to work around. Do not hand-roll anything it provides —
+  Accordion, Popover, Sheet, Table, Badge, Button, Input, Card, Separator, Skeleton.
+  It does pull real Radix packages for behaviour; that is the trade and it is worth
+  it for focus management and collision positioning.
+  The design system is `docs/design-principles.md`, and tokens live in one place
+  (`src/app/globals.css`). **One light palette, no dark theme** — see the ADR.
+  (This reverses the original "no component library, no design system" rule, which
+  held while the UI was a thin surface over the pipeline.)
 
 ## Layout
 
@@ -218,11 +227,15 @@ assignment explicitly asks about the save-then-crash case.
 
 ### Rules
 
+- **Never commit or push without an explicit instruction from me in that message.
+  "Slice done" is that instruction; a plan approval is not.**
 - Keep the `Co-Authored-By: Claude` trailer. AI usage is disclosed in this project,
   not hidden.
 - Commit at **vertical slice** boundaries, not per file or per task.
 - Never force-push. Never rewrite history. A `fix:` correcting an earlier choice is a
   positive signal, not something to hide.
+- **Never run `git stash`, `reset`, `checkout`, or any command that modifies my working
+  tree without asking first. Read-only git commands are fine.**
 - Never commit `.env`. `.env.example` is committed and must stay current.
 - No feature branches, no PRs. Commit and push directly to `main`.
 

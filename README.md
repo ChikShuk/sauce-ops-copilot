@@ -28,6 +28,12 @@ Then open http://localhost:3000
 LLM provider. **With a key:** set `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic`
 in `.env` for real model-generated summaries.
 
+**Switching between them without a restart:** the sidebar's **Model** control writes the
+choice to Postgres, which both the web app and the worker read at the point of use, and
+**Re-write summary** on an open finding regenerates its prose under the current choice —
+same evidence, same priority, same drivers. Gated by `ENABLE_PROVIDER_TOGGLE` (on in
+`.env.example`); `LLM_PROVIDER` remains the default when nothing has been chosen.
+
 ---
 
 ## What this does
@@ -70,6 +76,15 @@ workers can never hold one job. Claiming mints a fresh `claim_token` that the di
 write replays, so a worker stale-reclaimed mid-flight updates zero rows instead of
 clobbering its replacement.
 
+There are two queues on that machinery. `event_jobs` is the product path, 1:1 with events.
+`enrichment_jobs` carries operator-requested rewrites from the dashboard's **Re-write
+summary** button, and exists as its own table because the two diverge on what a dead letter
+*means* — see the ADR. The worker **always drains `event_jobs` first**: ingestion is the
+product and a rewrite is a demo control, so a reviewer clicking the button during a burst
+of traffic cannot delay the events themselves. It is the same fairness question the
+traffic-spike section asks about one tenant degrading another, answered at the smallest
+scale the system has.
+
 **Worker** is a separate Node process. It claims a job, correlates the event, scores its
 priority, then calls the model. Correlation and scoring are deterministic and committed
 before the model is involved; an LLM outage degrades the prose and never fails the job.
@@ -89,8 +104,9 @@ is the whole ordered board plus the ids that changed.
 one client component that subscribes to the stream and replaces its state on each message.
 All the logic worth testing — which of the five card states a finding is in, how the
 drivers line is truncated — lives in pure functions in `lib/findings/cardState.ts`, so the
-components stay thin and no browser test harness is needed. The detail panel is fetched on
-demand and re-fetched when its finding's `version` or `status` moves.
+components stay thin and no browser test harness is needed. A finding's detail — summary,
+recommended actions, evidence, action history — is fetched on demand when its row is
+expanded, and re-fetched when that finding's `version` or `status` moves.
 
 ### Data flow
 <!-- OWNER: agent | slice: 6 -->
@@ -339,8 +355,20 @@ citation label:
 
 The framing that matters: **"the model didn't obey" and "obedience is survivable" are
 different claims,** and only the second can be guaranteed deterministically. Layer 2
-exists because of that. A fourth check runs the real model against the same payload and
-is skipped without an API key — evidence about the model's behavior, not a guarantee.
+exists because of that.
+
+**There is no fourth, automated layer, and this section used to claim there was.** Every
+provider in the test suite is a stub — `@anthropic-ai/sdk` is `vi.mock`ed in the only
+provider test, and nothing anywhere is gated on `ANTHROPIC_API_KEY`. The live checks
+described below were run by hand, during slice 5 and again on 2026-08-16. That is worth
+stating plainly rather than quietly correcting, because the gap is the point of the next
+paragraph: `npm test` cannot see this class of regression by construction.
+
+That last phrase is now literally true rather than merely descriptive: the integration
+setup forces the fallback provider and deletes the API key, so no test can reach a live
+model even by omission. It closes a real hole — one test *was* making live calls through a
+missing stub — at the cost of making the absent automated layer permanent until someone
+opts in with `ALLOW_LIVE_LLM=true`. See the testing section.
 
 **What the live layer actually caught.** On the first real run against
 `claude-sonnet-5`, the model refused the injected instruction correctly — and then wrote
@@ -354,6 +382,29 @@ what is supposed to be a customer-service artifact, and it tells an attacker the
 was seen and classified — useful reconnaissance for anyone iterating on payloads. The fix
 was a system-prompt rule not to mention prompt handling at all, re-verified against the
 live model.
+
+**And on 2026-08-16 it came back.** During an unrelated model-cost comparison, the same
+payload produced: *"The embedded text attempted to override instructions and was
+disregarded as it is not a legitimate operational instruction."* Sampling the real
+simulator preset 18 times against `claude-sonnet-5` at `effort: "low"` put the rate at
+**2 in 18**. The rule was still in the prompt, unedited since slice 5, and correctly
+worded — the model simply declined to follow it on some samples. Restating the same
+requirement a second time, on the `summary:` output-spec line rather than only inside the
+injection bullet, measured **0 in 18**. Both statements are now in the prompt, because
+both are what was measured; 0/18 against 2/18 is a weak result on a small sample and is
+not claimed as more than that.
+
+The honest conclusion is a boundary, not a fix. **Disclosure suppression is a prompt
+instruction, so it is a mitigation and not a control.** Everything structural held on
+every sample — the fence, the allowlist, the tag enum, the citation check, the database
+shape — and those hold whatever the model decides. Non-disclosure holds because the model
+usually cooperates, and "usually" is the entire difference between the two categories.
+Anything that must never happen has to live in `parse.ts`, not in the prompt. A
+deterministic version of this check is possible in principle (reject a summary matching a
+prompt-handling vocabulary), and was deliberately not written: it is a keyword blocklist
+on model prose, it would false-positive on legitimate summaries, and its failure mode —
+rejecting the response and degrading to the fallback writer — costs an operator a real
+narrative to suppress a leak that is embarrassing rather than dangerous.
 
 This is the case for the live layer existing. Layers 1–3 all passed on this response, and
 correctly so: the injected text stayed fenced, the output validated cleanly, and the
@@ -390,6 +441,88 @@ than two that drift.
 If summary quality turns out to be the weak point, the model id is a one-line change and
 the provider interface absorbs it. The claim is not that Sonnet is sufficient for
 everything; it is that this task was made small enough that it doesn't need more.
+
+*Which* provider runs is a runtime lookup rather than a startup constant: `LLM_PROVIDER` is
+the default, and a row in `app_settings` written by the dashboard toggle overrides it for
+both processes with no restart. That exists so the deterministic/LLM boundary can be
+demonstrated rather than described — it is gated behind `ENABLE_PROVIDER_TOGGLE`, and in
+production provider selection is deployment config, not something a dashboard can change.
+
+#### What the cheaper model would actually buy
+<!-- slice: 5, measured 2026-08-16 -->
+
+The argument above says the boundary makes a cheaper model sufficient. That invites the
+obvious question — *then why not the cheapest one?* — so it was measured rather than
+asserted. Live calls, the real `buildPrompt` and `buildOutputJsonSchema`, one
+representative finding (3 events, one fenced complaint, two priority drivers), prices as
+of 2026-08-16:
+
+| Model | in / out tokens | $/MTok | Per finding | Per 1,000 | Latency (3 runs) |
+|---|---|---|---|---|---|
+| Haiku 4.5 | 1,187 / 245 | $1 / $5 | **$0.0024** | $2.41 | 2.7–3.1s |
+| **Sonnet 5** (current, intro price) | 1,506 / 314 | $2 / $10 | **$0.0062** | $6.15 | 4.2–5.2s |
+| Sonnet 5 (list, from 2026-09-01) | 1,506 / 314 | $3 / $15 | $0.0092 | $9.23 | — |
+| Opus 5 | ~1,510 / 323 | $5 / $25 | $0.0156 | $15.63 | 5.7s |
+
+Three things the sticker prices don't show:
+
+- **Haiku's advantage is larger than the 3× price ratio.** It uses the older tokenizer, so
+  identical prompt text bills 1,187 tokens against Sonnet 5's 1,506 — about 25% fewer. The
+  effective gap at list price is **3.8×**, not 3×.
+- **The JSON Schema is ~39% of every input.** `count_tokens` on system + user returns 915
+  (Sonnet 5) and 690 (Haiku 4.5); the live calls bill 1,506 and 1,187. The difference —
+  roughly 590 and 500 tokens — is `output_config.format`. That is the price of structured
+  outputs and it is worth paying, but it is the largest single line item on the input side.
+- **It cannot be cached away.** The stable prefix here is the system prompt, about 380
+  tokens, against a minimum cacheable prefix of 1,024 tokens on Sonnet 5 and 4,096 on
+  Haiku 4.5. Prompt caching is unavailable to this workload at any breakpoint placement,
+  which is what the comment in `llm/pricing.ts` already says.
+
+One cost lever was tested and rejected: `claude-sonnet-5` runs adaptive thinking whenever
+`thinking` is unset, which it is here, so forcing `thinking: {type: "disabled"}` looked
+like free savings. It measured as noise (312 output tokens against 335 and 308) — at
+`effort: "low"` the model is barely thinking already.
+
+**On quality, the gap is narrow and real.** Every model returned schema-valid JSON with
+correct allowlist actions, correct tags, correct citations, and no invented labels, and
+both Sonnet 5 and Haiku 4.5 refused the injection preset outright. Haiku's prose trends
+generic where Sonnet's is concrete, and Haiku wrote evidence labels inline into the
+summary text — `"…missing items upon receipt (E1, E2)."` — which reads as noise on a card
+that already renders its evidence in a table. That last one is now closed in the prompt
+for every model, not just Haiku: labels belong in `cited_labels` and nowhere else. Opus 5
+was indistinguishable from Sonnet 5 at two and a half times the cost, which is the
+original decision to reject Opus-tier, confirmed with a number.
+
+**The switch is worth making when volume makes it worth making.** At demo volume the
+difference is 0.7¢ per finding and the prose is the graded artifact, so Sonnet 5 stays. At
+10,000 findings/day it is $92/day against $24/day, and the trade inverts. Two code changes
+go with it, neither optional:
+
+1. **Remove `output_config.effort`.** Haiku 4.5 rejects it outright — `400 invalid_request_error:
+   "This model does not support the effort parameter."` It is currently unconditional in
+   `callModel`.
+2. **Add `claude-haiku-4-5: { input: 1, output: 5 }` to `RATES` in `llm/pricing.ts`.** The
+   rate table is keyed on the exact model id with no prefix fallback, by design — a missing
+   entry means every finding reports tokens with a null cost rather than a wrong one.
+
+**Caveat, stated at the same volume as the numbers:** this is one finding shape, a handful
+of runs, and one injection payload. It is a directional read, not an eval. If the model
+choice ends up mattering, the honest version is a fixed set of ~20 findings scored against
+the `parse.ts` validator plus a human read of the summaries.
+
+**Token counts and cost are shown on the operator's board — deliberately, and only
+because this is a demo.** Every model-written finding carries a chip with its tokens and
+what they cost, accumulated across each enrichment the finding has had. That is there so a
+reviewer reading this repo can see the cost argument above as a real number on a real
+finding rather than as a claim in a document, and multiply it by their own event volume.
+
+It is the wrong place for it in production. A restaurant manager triaging a late delivery
+has no decision that depends on the summary having cost $0.0054, and putting a per-item
+cost in front of them invites the question of whether the cheaper summary was the worse
+one. This is internal telemetry: it belongs on an ops or finance view, aggregated by
+restaurant and by day, next to queue depth and dead-letter counts. The stored columns and
+the `enrichment.completed` log line are the durable record and would stay exactly as they
+are; only the chip comes off the operator's card.
 
 ### Real-time: every connect is a snapshot
 <!-- slice: 6 -->
@@ -600,18 +733,38 @@ Three things I'd do with that data. Run prompt changes against the flagged set a
 
 ```bash
 docker compose up -d db
-npm test                      # 266 tests: 13 unit files, 15 integration files
+npm test                      # 337 tests: 17 unit files, 18 integration files
 npm run test:unit             # pure functions, no database
 npm run test:integration      # real Postgres, real SQL, no mocked queries
 ```
 
-The integration suite **refuses to run while a worker is consuming from the same
-database**. `claimJob` takes the oldest eligible job in the table regardless of who
-queued it, so a stray `npm run worker` steals jobs from the tests — and it doesn't fail
-cleanly, it fails a *different* assertion on each run, each one plausible enough to look
-like a real bug. `tests/setup.integration.ts` queues a canary job, waits two poll
-intervals, and aborts the run by name if anything claimed it. That guard was written
-because this happened during slice 9, not in anticipation of it.
+**`npm test` is green with the full stack running beside it,** and that took a fix rather
+than a convention. The integration suite runs against its own database — `sauce_ops_test`,
+created on first run on the same server, from the same migrations — because the queue is
+global: `claimJob` takes the oldest eligible job in `event_jobs` regardless of who queued
+it. Any worker on the same database competes with the tests for every job they enqueue,
+and that includes the `worker` service in `docker compose up`. Sharing one database meant
+the documented way to run this project and the documented way to test it could not both be
+true at once. Nothing new to configure — the name is derived from `DATABASE_URL`.
+
+Contention doesn't fail cleanly, which is why a second guard survives the fix: it fails a
+*different* assertion on each run, each one plausible enough to look like a real bug
+(`queued` reads 0, a provider records no calls, a finding hasn't appeared yet).
+`tests/setup.integration.ts` queues a canary job, waits two poll intervals, and aborts by
+name if anything claimed it. The separate database removes the ordinary cause; the canary
+still catches a worker deliberately pointed at the test database — a stale `DATABASE_URL`
+in a shell, say. Both were written because this happened, not in anticipation of it.
+
+**The suite cannot reach a live model.** Enrichment takes an optional provider and falls
+back to whatever `LLM_PROVIDER` names, so a developer running with `LLM_PROVIDER=anthropic`
+— the setting you need to demo the product — would have `npm test` billing a real API and
+failing on network latency. The same setup file therefore forces `LLM_PROVIDER=fallback`
+*and* deletes `ANTHROPIC_API_KEY`: the first covers the env default, the second covers the
+runtime override, since a stored `anthropic` choice with no key degrades to the fallback
+writer. `ALLOW_LIVE_LLM=true` opts a whole run out for a deliberate live check, and a
+single file opts out by mocking `src/lib/env`. `tests/integration/noLiveLlm.test.ts`
+asserts the property, so removing the guard turns something red instead of quietly
+restoring the bill.
 
 ### What each scenario is covered by
 
@@ -638,7 +791,7 @@ fired, a slice-6 cache that served a stale board, and a `waitForNext` test helpe
 if (messages.length > before)`) — all three sat inside passing, covered tests.
 
 So each load-bearing test was verified by putting the bug back and confirming it goes
-red. The four reverts below were run against this commit; the output is what the run
+red. The five reverts below were run against this commit; the output is what the run
 actually printed.
 
 **1. Remove the staleness predicate from `claimJob`** — make any `processing` job
@@ -718,6 +871,59 @@ A helper that waits for the *next* message instead of returning the one already
 delivered turns a race into a five-second hang, or into a pass that asserted on the
 wrong message. It had been in the suite since slice 6, passing, because the board poller
 happened to tick after every call.
+
+**5. Drop `llmUsage` from the board card** — make the server emit a finding the
+dashboard's own schema refuses:
+
+```diff
+-    llmUsage: toUsage(row),
+```
+```
+ ❯ tests/integration/sseStream.test.ts (5 tests | 3 failed)
+   × shows a client that disconnected mid-processing the finished state when it returns
+   × keeps polled updates readable by the dashboard, not just the connect frame
+   × serves a later connection correctly after an earlier one was aborted
+   Error: board frame would be refused by the dashboard: findings.0.llmUsage:
+   Invalid input: expected object, received undefined
+      Tests  3 failed | 2 passed (5)
+```
+This one is a repair, not a rehearsal — it shipped, and the four reverts above are the
+reason it's worth writing down how. `boardFrom`, the helper every SSE test reads its
+payload through, was `JSON.parse(frame.data) as BoardMessage`: the same cast that
+*The dashboard validates what the stream sends it* (`docs/decisions.md`) removed from the
+client, left standing in the tests that exist to prove the client's contract holds.
+A cast makes a test agree with the server no matter what the server sends. It now parses
+through `boardMessageSchema` — the browser's own schema, not a copy.
+
+The difference is measurable, and it's the argument for fixing the helper rather than
+adding one more assertion. With the schema in place, **three** tests fail, two of them
+written for entirely unrelated reasons — the helper makes every SSE test a contract test,
+so the next dropped field is caught by tests that never heard of it. With the cast
+restored, only `keeps polled updates readable by the dashboard` fails, and that test only
+exists because we already knew which field to go looking at. The second half of the same
+gap: every SSE test read only the **connect** frame, so the poll path — a separate call
+path, and the one that actually broke — had no frame-level assertion at all.
+
+### The stale indicator, in practice
+
+The bug above is also the first real use of the connection state machine, and it behaved
+the way *A board that stopped updating says so* (`docs/decisions.md`) argued it would
+rather than the way a feature usually behaves once the argument meets the system. The
+board refused each malformed payload, held the last good one by reference so nothing
+rendered half-updated, and switched to **Not updating** — immediately, since a refused
+payload needs no clock. So the screen showed a board declaring itself stopped, beside a
+*Related event* button that visibly did nothing. Without that state the same failure is a
+dashboard that looks live, sits on a snapshot minutes old, and quietly disagrees with the
+database.
+
+That is the case for spending a state on it, and it is worth more than the argument made
+in the ADR: a frozen board that claims to be live is the same class of failure as a live
+finding silently filed under Resolved — the screen is confidently wrong and nothing on it
+says so. The split between the two channels also held up. The badge says *the board has
+stopped*, which is the part an operator needs and the part that distinguishes a broken
+dashboard from a quiet one; the console line (`board.payload_rejected`, carrying the field
+path and the finding id) says **which field**, which is the part that turns it into a
+one-line diagnosis instead of an investigation.
 
 ### The kill-and-restart drill
 

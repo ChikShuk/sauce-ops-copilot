@@ -1,7 +1,25 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import {
+  BracesIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  CopyIcon,
+  Link2Icon,
+  ListOrderedIcon,
+  LoaderCircleIcon,
+  MessageSquareWarningIcon,
+  ShieldAlertIcon,
+  ShuffleIcon,
+  ZapIcon,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import type { FindingCard } from "@/lib/findings/types";
+import type { ProviderName, ProviderToggleState } from "@/lib/settings/types";
+import { cn } from "@/lib/utils";
 import {
   buildComplaint,
   buildDeliveryDelay,
@@ -12,6 +30,9 @@ import {
   sampleJsonBody,
   type SimulatorPost,
 } from "@/lib/simulator/presets";
+import { labelEventType, labelRestaurant } from "@/lib/format";
+import { Tip } from "./Tip";
+import { SIMULATOR_TIPS } from "./tips";
 
 // Newest first, and short: this is a demo affordance, not an audit log. The
 // board itself is the record of what happened.
@@ -64,7 +85,10 @@ async function postEvent(post: SimulatorPost, label: string): Promise<LogEntry> 
         ...entry,
         status: res.status,
         outcome: "created",
-        detail: `${post.body.event_type} · ${post.restaurantId} · ${data.event_id}`,
+        // The event id stays raw on purpose — it is the value you would grep
+        // the logs or the database for. The type and restaurant are read, not
+        // looked up, so they get their display forms.
+        detail: `${labelEventType(post.body.event_type)} · ${labelRestaurant(post.restaurantId)} · ${data.event_id}`,
       };
     }
 
@@ -94,24 +118,30 @@ async function postEvent(post: SimulatorPost, label: string): Promise<LogEntry> 
 }
 
 const OUTCOME_STYLES: Record<LogEntry["outcome"], { className: string; label: string }> = {
-  created: { className: "border-line text-ink-muted", label: "Accepted" },
-  duplicate: { className: "border-warn-border bg-warn-bg text-warn-fg", label: "Duplicate" },
-  rejected: { className: "border-danger-border text-danger-fg", label: "Rejected" },
-  error: { className: "border-danger-border text-danger-fg", label: "Failed" },
+  created: { className: "bg-surface text-ink-muted", label: "Accepted" },
+  duplicate: { className: "bg-warn-bg text-warn-fg", label: "Duplicate" },
+  rejected: { className: "bg-danger-bg text-danger-fg", label: "Rejected" },
+  error: { className: "bg-danger-bg text-danger-fg", label: "Failed" },
 };
 
+/**
+ * The sidebar's body: every way to put an event into the system.
+ *
+ * It lives in a permanent sidebar rather than a collapsible strip above the
+ * board, so it never competes with the findings list for vertical space and a
+ * reviewer never has to discover it. Each control carries an InfoTip saying what
+ * it posts and what to expect, which is what makes the board explain itself.
+ */
 export function SimulatorPanel({
-  open,
-  onToggle,
   selected,
   fallbackFinding,
   demoFailureEnabled,
+  providerToggle,
 }: {
-  open: boolean;
-  onToggle: () => void;
   selected: FindingCard | null;
   fallbackFinding: FindingCard | null;
   demoFailureEnabled: boolean;
+  providerToggle: ProviderToggleState;
 }) {
   const [restaurantId, setRestaurantId] = useState("bellas_pizza");
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -192,181 +222,311 @@ export function SimulatorPanel({
   }
 
   return (
-    <section className="shrink-0 border-b border-line">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-ink-muted hover:bg-surface"
+    <div className="flex flex-col gap-6">
+      {providerToggle.enabled && <ProviderSwitch state={providerToggle} />}
+
+      <Group
+        title="Reference scenario"
+        note="The assignment's three events. Both buttons converge on an identical finding."
       >
-        <span aria-hidden className="text-ink-subtle">
-          {open ? "▾" : "▸"}
-        </span>
-        Simulate events
-        <span className="font-normal text-ink-subtle">
-          post operational events and watch the board react
-        </span>
-      </button>
+        <Action
+          busy={busy === "reference_chronological"}
+          icon={<ListOrderedIcon className="size-4" />}
+          infoLabel="Reference scenario"
+          info={SIMULATOR_TIPS.referenceChronological}
+          onClick={() => runReferencePair("chronological")}
+        >
+          In order
+        </Action>
+        <Action
+          busy={busy === "reference_out_of_order"}
+          icon={<ShuffleIcon className="size-4" />}
+          infoLabel="Reference scenario, out of order"
+          info={SIMULATOR_TIPS.referenceOutOfOrder}
+          onClick={() => runReferencePair("out_of_order")}
+        >
+          Out of order
+        </Action>
+      </Group>
 
-      {open && (
-        <div className="max-h-[50vh] overflow-y-auto border-t border-line px-4 py-3">
-          <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
-            <Group
-              title="The assignment's reference scenario"
-              note="Both post the same three events — a delay, a complaint 17 minutes later, and a review 2h15m after that. They converge on an identical finding: one card, three events, the same window. Arrival order does not change the result. Each run uses its own restaurant so the two cards sit side by side."
-            >
-              <Action
-                busy={busy === "reference_chronological"}
-                onClick={() => runReferencePair("chronological")}
-              >
-                Reference scenario
-              </Action>
-              <Action
-                busy={busy === "reference_out_of_order"}
-                onClick={() => runReferencePair("out_of_order")}
-              >
-                Reference scenario (out of order)
-              </Action>
-            </Group>
+      <Group title="Single events" note={`Posted to ${labelRestaurant(restaurantId)}.`}>
+        <Action
+          busy={busy === "delay"}
+          icon={<ClockIcon className="size-4" />}
+          infoLabel="Delivery delay"
+          info={SIMULATOR_TIPS.delay}
+          onClick={() => run("delay", [buildDeliveryDelay(restaurantId)], "Delivery delay")}
+        >
+          Delivery delay
+        </Action>
+        <Action
+          busy={busy === "complaint"}
+          icon={<MessageSquareWarningIcon className="size-4" />}
+          infoLabel="Customer complaint"
+          info={SIMULATOR_TIPS.complaint}
+          onClick={() => run("complaint", [buildComplaint(restaurantId)], "Complaint")}
+        >
+          Customer complaint
+        </Action>
+        <Action
+          busy={busy === "duplicate"}
+          icon={<CopyIcon className="size-4" />}
+          infoLabel="Duplicate event"
+          info={SIMULATOR_TIPS.duplicate}
+          onClick={() => {
+            // One click, two posts of an identical body: always shows
+            // 201 then 200 without depending on anything posted earlier.
+            const post = buildDeliveryDelay(restaurantId);
+            return run("duplicate", [post, post], "Duplicate");
+          }}
+        >
+          Duplicate event
+        </Action>
+        <Action
+          busy={busy === "related"}
+          icon={<Link2Icon className="size-4" />}
+          disabled={!relatedTarget}
+          title={
+            relatedTarget
+              ? undefined
+              : "No findings on the board yet — there is nothing to relate an event to."
+          }
+          infoLabel="Related event"
+          info={SIMULATOR_TIPS.related}
+          onClick={() =>
+            relatedTarget &&
+            run("related", [buildRelatedEvent(relatedTarget.restaurantId)], "Related event")
+          }
+        >
+          {relatedTarget
+            ? `Related → ${labelRestaurant(relatedTarget.restaurantId)}`
+            : "Related event"}
+        </Action>
+      </Group>
 
-            <Group title="Single events" note={`Posted to ${restaurantId}.`}>
-              <Action
-                busy={busy === "delay"}
-                onClick={() => run("delay", [buildDeliveryDelay(restaurantId)], "Delivery delay")}
-              >
-                Delivery delay
-              </Action>
-              <Action
-                busy={busy === "complaint"}
-                onClick={() => run("complaint", [buildComplaint(restaurantId)], "Complaint")}
-              >
-                Customer complaint
-              </Action>
-              <Action
-                busy={busy === "duplicate"}
-                onClick={() => {
-                  // One click, two posts of an identical body: always shows
-                  // 201 then 200 without depending on anything posted earlier.
-                  const post = buildDeliveryDelay(restaurantId);
-                  return run("duplicate", [post, post], "Duplicate");
-                }}
-              >
-                Duplicate event
-              </Action>
-              <Action
-                busy={busy === "related"}
-                disabled={!relatedTarget}
-                title={
-                  relatedTarget
-                    ? undefined
-                    : "No findings on the board yet — there is nothing to relate an event to."
-                }
-                onClick={() =>
-                  relatedTarget &&
-                  run(
-                    "related",
-                    [buildRelatedEvent(relatedTarget.restaurantId)],
-                    "Related event",
-                  )
-                }
-              >
-                {relatedTarget
-                  ? `Related event → ${relatedTarget.restaurantId}`
-                  : "Related event"}
-              </Action>
-            </Group>
+      <Group title="Defences" note="Both are tested; these buttons make them watchable.">
+        <Action
+          busy={busy === "injection"}
+          icon={<ShieldAlertIcon className="size-4" />}
+          infoLabel="Prompt injection attempt"
+          info={SIMULATOR_TIPS.injection}
+          onClick={() =>
+            run("injection", [buildInjectionComplaint(restaurantId)], "Prompt injection")
+          }
+        >
+          Prompt injection
+        </Action>
+        {demoFailureEnabled && (
+          <Action
+            busy={busy === "force_fail"}
+            icon={<ZapIcon className="size-4" />}
+            infoLabel="Forced processing failure"
+            info={SIMULATOR_TIPS.forceFail}
+            onClick={() => run("force_fail", [buildForceFailure(restaurantId)], "Forced failure")}
+          >
+            Force a failure (~15s)
+          </Action>
+        )}
+      </Group>
 
-            <Group
-              title="Defences"
-              note="Both of these are tested; these buttons make them watchable."
-            >
-              <Action
-                busy={busy === "injection"}
-                onClick={() =>
-                  run(
-                    "injection",
-                    [buildInjectionComplaint(restaurantId)],
-                    "Prompt injection",
-                  )
-                }
-              >
-                Prompt injection attempt
-              </Action>
-              {demoFailureEnabled && (
-                <Action
-                  busy={busy === "force_fail"}
-                  onClick={() =>
-                    run("force_fail", [buildForceFailure(restaurantId)], "Forced failure")
-                  }
-                >
-                  Force a processing failure (~15s)
-                </Action>
-              )}
-            </Group>
+      <Group title="Target">
+        <div className="flex items-center gap-1">
+          <label htmlFor="sim-restaurant" className="sr-only">
+            Restaurant
+          </label>
+          <Input
+            id="sim-restaurant"
+            value={restaurantId}
+            onChange={(event) => setRestaurantId(event.target.value)}
+            spellCheck={false}
+            className="min-w-0 flex-1 font-mono text-meta"
+          />
+          <Tip label="Restaurant" wide>
+            {SIMULATOR_TIPS.restaurant}
+          </Tip>
+        </div>
+      </Group>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <label htmlFor="sim-restaurant" className="text-xs text-ink-subtle">
-                Restaurant
-              </label>
-              <input
-                id="sim-restaurant"
-                value={restaurantId}
-                onChange={(event) => setRestaurantId(event.target.value)}
-                className="rounded border border-line bg-canvas px-2 py-1 font-mono text-xs text-ink"
-              />
-              <span className="text-xs text-ink-subtle">
-                Any value works — there is no tenant registry. Use a new one to watch a
-                separate finding appear.
-              </span>
-            </div>
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 text-meta font-semibold uppercase tracking-wider text-ink-subtle hover:text-ink-muted">
+          <ChevronRightIcon
+            aria-hidden
+            className="size-3.5 transition-transform group-open:rotate-90"
+          />
+          Custom JSON
+        </summary>
+        <div className="mt-2 flex flex-col gap-2">
+          <Textarea
+            value={json}
+            onChange={(event) => setJson(event.target.value)}
+            spellCheck={false}
+            rows={10}
+            aria-label="Custom event JSON"
+            className="font-mono text-meta"
+          />
+          <Action
+            busy={busy === "json"}
+            icon={<BracesIcon className="size-4" />}
+            infoLabel="Custom JSON"
+            info={SIMULATOR_TIPS.customJson}
+            onClick={submitJson}
+          >
+            Post JSON
+          </Action>
+        </div>
+      </details>
 
-            <details className="text-xs">
-              <summary className="cursor-pointer text-ink-subtle hover:text-ink-muted">
-                Post custom JSON
-              </summary>
-              <p className="mt-2 text-ink-subtle">
-                Sent to the same endpoint with no client-side checking, so validation errors
-                come back from the API&apos;s own schema.
-              </p>
-              <textarea
-                value={json}
-                onChange={(event) => setJson(event.target.value)}
-                spellCheck={false}
-                rows={10}
-                className="mt-2 w-full rounded border border-line bg-surface p-2 font-mono text-xs text-ink"
-              />
-              <Action busy={busy === "json"} onClick={submitJson}>
-                Post JSON
-              </Action>
-            </details>
-
-            {log.length > 0 && (
-              <div>
-                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-ink-subtle">
-                  Activity
-                </p>
-                <ul className="flex flex-col gap-1">
-                  {log.map((entry) => {
-                    const style = OUTCOME_STYLES[entry.outcome];
-                    return (
-                      <li
-                        key={entry.id}
-                        className={`rounded border px-2 py-1 text-xs ${style.className}`}
-                      >
-                        <span className="font-mono">{entry.status || "—"}</span>{" "}
-                        <span className="font-medium">{style.label}</span>{" "}
-                        <span className="text-ink-subtle">{entry.label}</span>
-                        <p className="mt-0.5 break-words">{entry.detail}</p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-          </div>
+      {log.length > 0 && (
+        <div>
+          <p className="mb-2 text-meta font-semibold uppercase tracking-wider text-ink-subtle">
+            Activity
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {log.map((entry) => {
+              const style = OUTCOME_STYLES[entry.outcome];
+              return (
+                <li key={entry.id} className={cn("rounded-sm px-2.5 py-2", style.className)}>
+                  <p className="flex items-baseline gap-1.5 text-meta">
+                    <span className="font-mono">{entry.status || "—"}</span>
+                    <span className="font-medium">{style.label}</span>
+                    <span className="truncate text-ink-subtle">{entry.label}</span>
+                  </p>
+                  <p className="mt-1 break-words text-meta leading-relaxed">{entry.detail}</p>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
-    </section>
+    </div>
+  );
+}
+
+/**
+ * Which writer produces the prose, switched at runtime.
+ *
+ * The value lives in Postgres rather than in this component, because the process
+ * that acts on it is the worker and it is not this one. The button writes a row;
+ * the worker reads that row on its next enrichment. No restart, no signal, no
+ * shared cache — the two processes already agree on a database.
+ *
+ * State is local after the write. A second browser tab keeps showing what it
+ * loaded with until it reloads, which is cosmetic: the enrichment itself is
+ * always correct because the worker reads the row per call, never the UI.
+ */
+function ProviderSwitch({ state }: { state: ProviderToggleState }) {
+  const [active, setActive] = useState<ProviderName>(state.active);
+  const [source, setSource] = useState(state.source);
+  const [busy, setBusy] = useState<ProviderName | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function choose(provider: ProviderName) {
+    if (provider === active || busy !== null) return;
+
+    setBusy(provider);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/settings/provider", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const data = (await res.json()) as {
+        name?: ProviderName;
+        source?: "override" | "env";
+        message?: string;
+      };
+
+      if (!res.ok || !data.name || !data.source) {
+        setError(data.message ?? "Could not switch the provider.");
+        return;
+      }
+
+      setActive(data.name);
+      setSource(data.source);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Group title="Model">
+      <div className="flex items-center gap-1">
+        <div className="flex min-w-0 flex-1 gap-1 rounded-xl bg-surface p-1">
+          <SwitchOption
+            label="Real model"
+            selected={active === "anthropic"}
+            busy={busy === "anthropic"}
+            // Said here rather than discovered at enrichment time: without a key
+            // the real model cannot run, and a control that accepts the click and
+            // silently produces template prose teaches the reviewer the wrong
+            // thing about the system.
+            disabledReason={
+              state.hasKey ? null : "No ANTHROPIC_API_KEY in this environment."
+            }
+            onClick={() => choose("anthropic")}
+          />
+          <SwitchOption
+            label="Template"
+            selected={active === "fallback"}
+            busy={busy === "fallback"}
+            disabledReason={null}
+            onClick={() => choose("fallback")}
+          />
+        </div>
+        <Tip label="Which writer produces the prose" wide>
+          {SIMULATOR_TIPS.provider}
+        </Tip>
+      </div>
+
+      <p className="text-meta leading-relaxed text-ink-subtle">
+        {source === "env"
+          ? "From LLM_PROVIDER — nobody has switched it."
+          : "Overridden here. Applies to the worker on its next enrichment."}
+      </p>
+
+      {error && <p className="text-meta leading-relaxed text-danger-fg">{error}</p>}
+    </Group>
+  );
+}
+
+function SwitchOption({
+  label,
+  selected,
+  busy,
+  disabledReason,
+  onClick,
+}: {
+  label: string;
+  selected: boolean;
+  busy: boolean;
+  disabledReason: string | null;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabledReason !== null || busy}
+      title={disabledReason ?? undefined}
+      // aria-pressed rather than a radiogroup: two buttons where one is always
+      // on is a toggle, and the pressed state is what a screen reader needs to
+      // convey. The colour difference is backed by weight, so it does not rest
+      // on hue alone.
+      aria-pressed={selected}
+      className={cn(
+        "min-w-0 flex-1 cursor-pointer truncate rounded-lg px-2 py-1.5 text-meta transition-colors",
+        selected
+          ? "bg-card font-medium text-ink shadow-rest"
+          : "text-ink-subtle hover:text-ink",
+        disabledReason !== null && "cursor-not-allowed opacity-50 hover:text-ink-subtle",
+      )}
+    >
+      {busy ? "Switching…" : label}
+    </button>
   );
 }
 
@@ -381,35 +541,66 @@ function Group({
 }) {
   return (
     <div>
-      <p className="text-xs font-semibold uppercase tracking-wider text-ink-subtle">{title}</p>
-      {note && <p className="mt-1 text-xs leading-relaxed text-ink-subtle">{note}</p>}
-      <div className="mt-2 flex flex-wrap gap-2">{children}</div>
+      <p className="text-meta font-semibold uppercase tracking-wider text-ink-subtle">{title}</p>
+      {note && <p className="mt-1 text-meta leading-relaxed text-ink-subtle">{note}</p>}
+      <div className="mt-2.5 flex flex-col gap-1.5">{children}</div>
     </div>
   );
 }
 
+/**
+ * A full-width row rather than a pill in a wrapping flex: the sidebar is a
+ * column, and the shape gives every control somewhere to hang its InfoTip
+ * without crowding the label.
+ *
+ * Each carries a glyph for the kind of event it posts — a clock for a delay,
+ * two sheets for a duplicate, a shield for the injection probe. Nine buttons in
+ * one column are a wall of similar-length text otherwise, and the icon is what
+ * makes one findable at a glance. It doubles as the busy indicator: while a
+ * post is in flight the glyph becomes a spinner, so the row's shape never
+ * changes under the cursor.
+ */
 function Action({
   busy,
   disabled,
   title,
+  icon,
+  infoLabel,
+  info,
   onClick,
   children,
 }: {
   busy?: boolean;
   disabled?: boolean;
   title?: string;
+  icon: React.ReactNode;
+  infoLabel: string;
+  info: React.ReactNode;
   onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled || busy}
-      title={title}
-      className="rounded border border-line px-2.5 py-1.5 text-xs text-ink hover:bg-surface disabled:cursor-not-allowed disabled:text-ink-subtle disabled:hover:bg-transparent"
-    >
-      {busy ? "Posting…" : children}
-    </button>
+    <div className="flex items-center gap-1">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={onClick}
+        disabled={disabled || busy}
+        title={title}
+        className="h-9 min-w-0 flex-1 justify-start gap-2.5 rounded-xl px-3 text-label font-normal text-ink-muted shadow-rest hover:text-ink hover:shadow-lift"
+      >
+        <span
+          aria-hidden
+          className="shrink-0 text-ink-subtle transition-colors group-hover/button:text-brand"
+        >
+          {busy ? <LoaderCircleIcon className="size-4 animate-spin" /> : icon}
+        </span>
+        <span className="min-w-0 truncate">{busy ? "Posting…" : children}</span>
+      </Button>
+      <Tip label={infoLabel} wide>
+        {info}
+      </Tip>
+    </div>
   );
 }

@@ -29,6 +29,11 @@ export type CardPresentation = {
   retry: RetryState | null;
   staleProse: boolean;
   degraded: boolean;
+  // Whether a model wrote the prose currently on this finding. Deliberately not
+  // `!degraded`: a finding that has never been enriched is neither — it has no
+  // prose at all — and marking it as model-written would put a model badge on a
+  // finding no model has seen.
+  modelWritten: boolean;
 };
 
 const LABELS: Record<CardState, string> = {
@@ -92,6 +97,7 @@ export function deriveCardState(finding: FindingCard): CardPresentation {
     retry: finding.retry,
     staleProse: isProseStale(finding),
     degraded: finding.summarySource === "fallback",
+    modelWritten: finding.summarySource === "llm",
   };
 }
 

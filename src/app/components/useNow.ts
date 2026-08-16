@@ -67,3 +67,21 @@ export function useNow(intervalMs: number): number | null {
   const clock = clockFor(intervalMs);
   return useSyncExternalStore(clock.subscribe, clock.getSnapshot, serverSnapshot);
 }
+
+// Never notifies, so nothing that reads it ever re-renders on a timer.
+const noopSubscribe = () => () => {};
+const mountedOnClient = () => true;
+const notMountedOnServer = () => false;
+
+/**
+ * Whether hydration has happened, for components that need the server and the
+ * browser to render different things but do not need a clock.
+ *
+ * ExactTime used `useNow(60_000)` for this, and only ever compared it against
+ * null — so every absolute timestamp on the board re-rendered once a minute to
+ * produce the string it already had. A component should not re-render more often
+ * than its output can change, and this one's output cannot change at all.
+ */
+export function useMounted(): boolean {
+  return useSyncExternalStore(noopSubscribe, mountedOnClient, notMountedOnServer);
+}

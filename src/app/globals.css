@@ -1,47 +1,83 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-/* The whole palette, in one place, as semantic roles rather than colour names.
-   Components reference `bg-surface` and `text-ink-subtle`, never `zinc-500` —
-   which is what makes a second theme a change to this file instead of a change
-   to every component.
+/* The whole design system, in one place, as semantic roles rather than raw
+   values. Components reference `bg-card`, `text-meta` and `shadow-rest`, never
+   `zinc-500`, `text-[15px]` or a hand-rolled box-shadow.
 
-   Light is the base and dark is the override, because prefers-color-scheme has
-   no value when a browser has no preference, and light-on-white is the safer
-   thing to land on when nothing is known.
+   The roles and the reasoning behind each scale are written up in
+   docs/design-principles.md. Ratios below are measured, not eyeballed:
+   `npm run check:contrast` reads this file directly and fails on any pair
+   under threshold.
 
-   No toggle: this follows the operating system and holds no state. A theme
-   switch would need persistence, a settings surface, and a hydration-safe way
-   to read it back — none of which the brief asks for. */
+   ONE PALETTE. There is no dark theme and no `prefers-color-scheme` override.
+   A second palette that follows the OS means the palette actually being
+   designed is whichever one the author's machine is not set to — so it ships
+   unseen. One light theme, always visible, properly designed.
+
+   Two vocabularies live here and they are deliberately joined rather than
+   parallel. The domain tokens (--ink, --priority-*, --ok-*) are ours. The
+   shadcn tokens (--background, --muted, --primary) are aliases onto them, so
+   a shadcn Button and a hand-written chip cannot drift apart. */
 :root {
-  --canvas: #ffffff;
-  --surface: #f4f4f5;
-  --surface-hover: #e9e9ec;
-  --line: #d4d4d8;
+  /* Surfaces. The canvas is tinted and cards are white, so elevation reads as a
+     lift. The reverse — white canvas, grey cards — makes a shadow invisible and
+     turns every card back into an outlined box. */
+  --canvas: #f6f6f8;
+  --card: #ffffff;
+  --card-hover: #fbfbfc;
+  --surface: #f1f1f4;
+  --surface-hover: #e7e7ec;
+
+  /* Two weights of edge. --line is a divider inside a card and is decorative,
+     so it can be light now that shadows carry the separation. --line-strong
+     draws a control's own boundary — an input, a focus ring — which WCAG 1.4.11
+     requires to clear 3:1, so it cannot follow it down. */
+  --line: #e4e4e8;
+  --line-strong: #88888f;
+
   --ink: #18181b;
   /* Both are a step darker than the obvious zinc-600/500 pick: at those values
      ink-subtle lands at 4.4:1 against --surface, just under AA. It is the most
      used token in the app — every timestamp, label and secondary line — so it
-     is the wrong one to leave marginal. Ratios are measured, not eyeballed. */
+     is the wrong one to leave marginal. */
   --ink-muted: #3f3f46;
   --ink-subtle: #52525b;
 
+  /* The one non-status colour. Carries the active nav item and primary
+     buttons, and nothing else — status must never have to compete with brand
+     for the eye. */
+  --brand: #4f46e5;
+  --brand-fg: #ffffff;
+  --brand-soft: #eef2ff;
+
   /* Priority. The rail is a block of colour and the badge is small text, so
      they carry different weights of the same hue — the rail can be vivid, the
-     word has to stay readable. */
+     word has to stay readable.
+
+     Both are held to their proper thresholds: the rail is a graphical object at
+     3:1, the word is small text at 4.5:1. An earlier pass gave the word the
+     large-text 3:1 exemption, which never applied to it. */
   --priority-critical: #dc2626;
   --priority-critical-fg: #b91c1c;
   --priority-high: #ea580c;
   --priority-high-fg: #c2410c;
-  /* Rail darkened from amber-600, which sat at 2.9:1 against --surface. Yellow
-     rather than a darker orange so it stays separable from --priority-high next
-     to it in the list. */
+  /* Yellow rather than a darker orange so it stays separable from
+     --priority-high next to it in the list. The word is a step darker than the
+     rail's amber and no longer shares --warn-fg's exact value: at #b45309 it
+     measured 4.45:1 on --surface, just under AA. Those two tokens were equal by
+     coincidence, not by role — warn covers job state, this covers a priority
+     level — so splitting them costs nothing. */
   --priority-medium: #a16207;
-  --priority-medium-fg: #b45309;
+  --priority-medium-fg: #9a5b08;
   --priority-low: #0284c7;
   --priority-low-fg: #0369a1;
 
-  /* Grouped by meaning, not by hue: the analyzing pill, the retry chip and the
-     stale-prose chip are one warning vocabulary and must not drift apart. */
+  /* Grouped by meaning, not by hue: the analyzing badge, the retry chip and the
+     stale-prose chip are one warning vocabulary and must not drift apart. Each
+     has a tint as well as a foreground, so a status badge can be a soft filled
+     shape rather than an outline. */
   --ok-fg: #047857;
   --ok-border: #6ee7b7;
   --ok-bg: #ecfdf5;
@@ -52,56 +88,56 @@
 
   --danger-fg: #b91c1c;
   --danger-border: #fca5a5;
+  --danger-bg: #fef2f2;
 
-  /* Tint for the row that just changed. Solid rather than an alpha over the
-     canvas so it lands the same on a card and on a selected card. */
+  /* Tint for the row that just changed. Text is read through it while it
+     fades, so it is contrast-checked like any other surface. */
   --highlight: #dbeafe;
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: #09090b;
-    --surface: #18181b;
-    --surface-hover: #27272a;
-    --line: #27272a;
-    --ink: #fafafa;
-    /* Both a step lighter than zinc-400/500 for the same reason as the light
-       palette: zinc-500 on this canvas is 4.1:1, under AA. */
-    --ink-muted: #b4b4bd;
-    --ink-subtle: #94949f;
+  /* Elevation. Three steps, no more: resting card, lifted card, and the
+     popover that floats over everything. */
+  --elev-rest: 0 1px 2px 0 rgb(24 24 27 / 0.04), 0 1px 3px 0 rgb(24 24 27 / 0.06);
+  --elev-lift: 0 2px 4px -1px rgb(24 24 27 / 0.06), 0 6px 16px -2px rgb(24 24 27 / 0.1);
+  --elev-pop: 0 4px 8px -2px rgb(24 24 27 / 0.08), 0 12px 32px -4px rgb(24 24 27 / 0.16);
 
-    --priority-critical: #ef4444;
-    --priority-critical-fg: #f87171;
-    --priority-high: #f97316;
-    --priority-high-fg: #fb923c;
-    --priority-medium: #fbbf24;
-    --priority-medium-fg: #fcd34d;
-    --priority-low: #0ea5e9;
-    --priority-low-fg: #38bdf8;
-
-    --ok-fg: #6ee7b7;
-    --ok-border: #047857;
-    --ok-bg: #052e23;
-
-    --warn-fg: #fcd34d;
-    --warn-border: #b45309;
-    --warn-bg: #2a1f07;
-
-    --danger-fg: #fca5a5;
-    --danger-border: #b91c1c;
-
-    --highlight: #1e3a5f;
-  }
+  /* --- shadcn bridge -------------------------------------------------------
+     Aliases only. Every one of these resolves to a token defined above, so
+     there is exactly one place a colour is chosen. shadcn's --accent, --chart-*
+     and --sidebar-* are absent because nothing in the components we vendored
+     references them. */
+  --background: var(--canvas);
+  --foreground: var(--ink);
+  --card-foreground: var(--ink);
+  --popover: var(--card);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-fg);
+  --secondary: var(--surface);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface);
+  --muted-foreground: var(--ink-subtle);
+  --destructive: var(--danger-fg);
+  --border: var(--line);
+  --input: var(--line-strong);
+  --ring: var(--brand);
 }
 
 @theme inline {
   --color-canvas: var(--canvas);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
   --color-surface: var(--surface);
   --color-surface-hover: var(--surface-hover);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
   --color-ink: var(--ink);
   --color-ink-muted: var(--ink-muted);
   --color-ink-subtle: var(--ink-subtle);
+  --color-highlight: var(--highlight);
+
+  --color-brand: var(--brand);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-soft: var(--brand-soft);
 
   --color-priority-critical: var(--priority-critical);
   --color-priority-critical-fg: var(--priority-critical-fg);
@@ -122,9 +158,70 @@
 
   --color-danger-fg: var(--danger-fg);
   --color-danger-border: var(--danger-border);
+  --color-danger-bg: var(--danger-bg);
 
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* shadcn's own names, so its components resolve against the same palette. */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Five type steps, each named for the job it does, so a component picks a
+     role rather than a pixel value. Deliberately few, and deliberately far
+     apart: the board this replaced used five sizes inside a 7px range, which is
+     why nothing on it led.
+
+     Names avoid the --color-* set on purpose — Tailwind resolves `text-*` from
+     both namespaces, so a step called `--text-card` would collide with
+     `--color-card`. */
+  --text-lead: 1.3125rem; /* 21px — page title, stat numbers, expanded titles */
+  --text-lead--line-height: 1.875rem;
+  --text-lead--font-weight: 600;
+  --text-lead--letter-spacing: -0.015em;
+
+  --text-headline: 1.0625rem; /* 17px — the row's issue title; this leads */
+  --text-headline--line-height: 1.625rem;
+  --text-headline--font-weight: 600;
+  --text-headline--letter-spacing: -0.01em;
+
+  --text-body: 0.9375rem; /* 15px — summary prose, evidence text, driver detail */
+  --text-body--line-height: 1.625rem;
+  --text-body--font-weight: 400;
+
+  --text-label: 0.8125rem; /* 13px — drivers line, buttons, stat captions */
+  --text-label--line-height: 1.25rem;
+  --text-label--font-weight: 500;
+
+  --text-meta: 0.75rem; /* 12px — timestamps, chips, section headings */
+  --text-meta--line-height: 1.125rem;
+  --text-meta--font-weight: 400;
+
+  /* One radius ladder, in shadcn's names because its components already speak
+     them. 6 / 8 / 10 / 12px — chips, controls, cards. */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+
+  /* Named for role, not for a colour token — `shadow-card` would be ambiguous
+     with --color-card, which Tailwind would read as a shadow *colour*. */
+  --shadow-rest: var(--elev-rest);
+  --shadow-lift: var(--elev-lift);
+  --shadow-pop: var(--elev-pop);
+
+  --font-sans: var(--font-sans-family);
+  --font-mono: var(--font-mono-family);
 }
 
 body {
@@ -134,22 +231,43 @@ body {
 
 /* Draws the eye to the row that moved without moving it. Deliberately slow to
    fade: on a board that reorders itself, the operator needs long enough to
-   find where a card went. */
-@keyframes card-changed {
-  from {
-    background-color: var(--highlight);
-  }
-  to {
-    background-color: transparent;
-  }
+   find where a row went.
+
+   The tint is a separate layer rather than the row's own background-color. A
+   row has a background of its own, so fading to `transparent` would punch a
+   hole through it to the canvas, and fading to a fixed colour would be wrong
+   for the hovered and expanded variants. `isolation` guarantees a stacking
+   context so the negative z-index lands above the row's background and below
+   its content — the text stays readable through the tint rather than being
+   painted over by it. */
+.row-changed {
+  position: relative;
+  isolation: isolate;
 }
 
-.card-changed {
-  animation: card-changed 2.5s ease-out;
+.row-changed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--highlight);
+  animation: row-changed 2.5s ease-out forwards;
+}
+
+@keyframes row-changed {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card-changed {
+  .row-changed::after {
     animation: none;
+    opacity: 0;
   }
 }

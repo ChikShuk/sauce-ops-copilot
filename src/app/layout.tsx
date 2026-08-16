@@ -1,15 +1,26 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Plus Jakarta Sans over Geist: a tall x-height and open, slightly rounded
+// terminals read calmer at the small sizes this board lives at, and it has
+// enough character not to look like a default. Weights are limited to the four
+// the type scale actually uses, so nothing extra is downloaded.
+const sans = Plus_Jakarta_Sans({
+  variable: "--font-sans-family",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+// Identifiers only — event ids, order ids, opaque restaurant ids. JetBrains
+// Mono has unambiguous 0/O and 1/l, which is the whole job here.
+const mono = JetBrains_Mono({
+  variable: "--font-mono-family",
   subsets: ["latin"],
+  weight: ["400", "500"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -22,7 +33,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${sans.variable} ${mono.variable} h-full antialiased`}
     >
       {/*
         The dashboard is an app shell, not a document: the page itself never
@@ -34,7 +45,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         dvh rather than vh so a mobile browser's collapsing URL bar doesn't
         crop the last card.
       */}
-      <body className="h-dvh overflow-hidden">{children}</body>
+      <body className="h-dvh overflow-hidden">
+        <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+      </body>
     </html>
   );
 }
