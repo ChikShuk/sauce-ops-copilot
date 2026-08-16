@@ -31,9 +31,19 @@ export const POLL_INTERVAL_MS = 1_000;
 // nothing and a slower one would be the visible bottleneck.
 export const BOARD_POLL_INTERVAL_MS = 1_000;
 
-// Proxies and load balancers close a quiet connection. An SSE comment line is
-// the cheapest thing that counts as traffic.
+// Proxies and load balancers close a quiet connection. A named `heartbeat`
+// event is the cheapest thing that counts as traffic *and* is visible to the
+// browser — an SSE comment (`: keepalive`) also keeps the connection open, but
+// EventSource never surfaces comments to JavaScript, so the client could not
+// tell a healthy quiet board from a server that had stopped sending.
 export const SSE_KEEPALIVE_MS = 15_000;
+
+// How long the dashboard waits without a single sign of life before calling
+// itself stale. Two missed heartbeats plus slop: long enough that one dropped
+// beat is not an alarm, short enough that a frozen board is caught inside a
+// minute. An indicator that cries wolf is one an operator learns to ignore,
+// which is worse than not having it.
+export const STREAM_STALE_AFTER_MS = SSE_KEEPALIVE_MS * 2.5;
 
 // The demo failure trigger's event_id prefix, gated at runtime by
 // ENABLE_DEMO_FAILURE_TRIGGER (see src/worker/processEvent.ts).

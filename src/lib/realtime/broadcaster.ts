@@ -1,6 +1,6 @@
 import { BOARD_POLL_INTERVAL_MS } from "../config";
 import { listFindings, queueCounts } from "../findings/queries";
-import type { FindingCard, QueueCounts } from "../findings/types";
+import type { BoardMessage, FindingCard, QueueCounts } from "../findings/types";
 import { logJson } from "../log";
 
 /**
@@ -18,13 +18,14 @@ import { logJson } from "../log";
  *
  * `changed` exists only so the UI can briefly highlight what moved. Nothing
  * about correctness depends on it.
+ *
+ * The shape itself now lives in `findings/types.ts` as a Zod schema, because
+ * the client validates what arrives here rather than asserting it — and the
+ * client cannot import this module, which reaches the database. This file
+ * produces the message; that one defines it. Re-exported so existing importers
+ * of the type are unaffected.
  */
-export type BoardMessage = {
-  type: "board";
-  findings: FindingCard[];
-  queue: QueueCounts;
-  changed: string[];
-};
+export type { BoardMessage } from "../findings/types";
 
 type Listener = (message: BoardMessage) => void;
 
@@ -157,6 +158,43 @@ async function tick(instance: Broadcaster): Promise<void> {
     instance.polling = false;
   }
 }
+
+/**
+ * Dev only, and only reachable through hot reload — but it produced a real,
+ * silent failure, so it is guarded rather than commented about.
+ *
+ * The instance above deliberately survives a module reload because it is parked
+ * on globalThis. A running interval does not survive it cleanly: the callback
+ * closes over the *previous* module instance's `tick`, and therefore that
+ * instance's `listFindings` and `toCard`. Because `instance.timer` is then
+ * non-null, no later `subscribe` ever reinstalls it — so every polled board for
+ * the rest of the process's life is produced by whatever the code looked like
+ * when the timer was first armed.
+ *
+ * What that looks like from a browser: the connect message is built by the
+ * current module and is correct, and every update after it is built by stale
+ * code. When the stale code predates a field the client schema requires, the
+ * client refuses all of them and the board freezes on the connect snapshot while
+ * the operator keeps clicking things that visibly do nothing.
+ *
+ * Re-arming rather than clearing to null, because a reload with browsers still
+ * attached would otherwise stop the board outright until each of them happened
+ * to reconnect.
+ */
+function rearmPollerAfterModuleReload(): void {
+  const instance = globalStore[globalKey];
+  if (!instance?.timer) return;
+
+  clearInterval(instance.timer);
+  instance.timer =
+    instance.listeners.size > 0
+      ? setInterval(() => {
+          void tick(instance);
+        }, BOARD_POLL_INTERVAL_MS)
+      : null;
+}
+
+rearmPollerAfterModuleReload();
 
 /**
  * Attach a listener. Immediately delivers the current board, then keeps

@@ -49,7 +49,17 @@ export async function GET(req: Request): Promise<Response> {
         send(`event: board\ndata: ${JSON.stringify(message)}\n\n`);
       });
 
-      keepalive = setInterval(() => send(": keepalive\n\n"), SSE_KEEPALIVE_MS);
+      // A named event rather than an SSE comment. It still does the comment's
+      // job — any bytes keep a proxy from closing a quiet connection — but
+      // EventSource does not surface comments to JavaScript, and the client
+      // needs to be able to tell "nothing has changed" from "nothing is
+      // arriving". The board itself is only broadcast when it changes, so
+      // silence is the normal state of a healthy quiet system and cannot be
+      // read as a fault on its own.
+      keepalive = setInterval(
+        () => send(`event: heartbeat\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`),
+        SSE_KEEPALIVE_MS,
+      );
 
       // A tab close aborts the request without cancelling the stream, so the
       // subscription would otherwise outlive the reader it feeds.

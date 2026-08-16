@@ -49,6 +49,7 @@ function providerBusyDuring(during: () => Promise<void>): EnrichmentProvider {
         citedEventIds: input.evidence.slice(0, 1).map((item) => item.eventId),
         source: "llm",
         model: "stub-model-1",
+        usage: { inputTokens: 1_200, outputTokens: 300, costMicrosUsd: 5_400 },
       };
     },
   };

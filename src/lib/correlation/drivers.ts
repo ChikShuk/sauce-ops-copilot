@@ -6,7 +6,10 @@ import { PRIORITY_LEVELS, type PriorityDriver } from "./priority";
 // existed carry NULL, and a hand-edited row could carry anything — neither is
 // worth failing a render over, so a bad value degrades to "no drivers" rather
 // than throwing. The card has an explicit empty state for exactly that.
-const priorityDriverSchema = z.object({
+// Exported because findings/types.ts reuses it inside the finding-card schema:
+// the drivers line is the same shape whether it is being read out of jsonb here
+// or off an SSE payload there, and two schemas for it would be free to drift.
+export const priorityDriverSchema = z.object({
   signal: z.enum(["delay_minutes", "event_count", "review_rating", "recurrence"]),
   level: z.enum(PRIORITY_LEVELS),
   detail: z.string(),

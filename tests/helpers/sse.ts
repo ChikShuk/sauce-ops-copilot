@@ -1,3 +1,4 @@
+import { boardMessageSchema } from "../../src/lib/findings/types";
 import type { BoardMessage } from "../../src/lib/realtime/broadcaster";
 
 /**
@@ -137,8 +138,32 @@ export function frameReader(res: Response): {
   return { next, expectDone, cancel: () => reader.cancel() };
 }
 
+/**
+ * Parsed through the schema the browser uses, not cast to it.
+ *
+ * This used to be `JSON.parse(...) as BoardMessage` — the exact assertion
+ * findings/types.ts was written to eliminate on the client, left in place on the
+ * side that is supposed to prove the contract holds. A cast makes every SSE test
+ * agree with the server about the payload no matter what the server sends, so a
+ * board the dashboard would refuse outright passed the whole suite.
+ *
+ * It is not a hypothetical gap: a board went out missing `llmUsage`, every
+ * client dropped every update, and nothing here noticed. Validating at the frame
+ * boundary — after serialization, where the browser sees it — makes the
+ * server/client contract an assertion in each of these tests rather than an
+ * assumption shared by both sides of them.
+ */
 export function boardFrom(frame: SseFrame): BoardMessage {
   if (frame.event !== "board") throw new Error(`expected a board frame, got ${frame.event}`);
   if (frame.data === null) throw new Error("board frame carried no data");
-  return JSON.parse(frame.data) as BoardMessage;
+
+  const parsed = boardMessageSchema.safeParse(JSON.parse(frame.data));
+  if (!parsed.success) {
+    throw new Error(
+      `board frame would be refused by the dashboard: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  return parsed.data;
 }

@@ -48,6 +48,30 @@ async function firstBoard(reader: ReturnType<typeof frameReader>): Promise<Board
   return boardFrom(await reader.next());
 }
 
+/**
+ * Reads board frames until one satisfies `until`, ignoring keepalives.
+ *
+ * The poller emits on every change it notices, so a finding's trip from queued
+ * to ready can arrive as one frame or three depending on tick timing. Waiting
+ * for a condition rather than counting frames keeps that a scheduling detail —
+ * and every frame read on the way is validated by boardFrom, which is the point
+ * of reading them one at a time instead of sleeping past them.
+ */
+async function boardWhere(
+  reader: ReturnType<typeof frameReader>,
+  until: (board: BoardMessage) => boolean,
+  maxFrames = 10,
+): Promise<BoardMessage> {
+  for (let read = 0; read < maxFrames; read += 1) {
+    const frame = await reader.next();
+    if (frame.event !== "board") continue;
+
+    const board = boardFrom(frame);
+    if (until(board)) return board;
+  }
+  throw new Error(`no matching board arrived within ${maxFrames} frames`);
+}
+
 async function ingest(restaurantId: string): Promise<string> {
   const response = await postEvent(restaurantId, {
     event_id: `evt_${randomUUID()}`,
@@ -81,6 +105,7 @@ function providerBusyDuring(during: () => Promise<void>): EnrichmentProvider {
         citedEventIds: input.evidence.slice(0, 1).map((item) => item.eventId),
         source: "llm",
         model: "stub-model-1",
+        usage: { inputTokens: 1_200, outputTokens: 300, costMicrosUsd: 5_400 },
       };
     },
   };
@@ -149,6 +174,47 @@ describe("the SSE route", () => {
       expect(board.findings[0].hasSummary).toBe(true);
       expect(board.queue.queued).toBe(0);
       expect(board.queue.analyzing).toBe(0);
+    } finally {
+      abort();
+    }
+  });
+
+  /**
+   * The connect frame is built by `subscribe`; every frame after it is built by
+   * the poller. Two call paths, and only the first was ever read here — so a
+   * poller emitting a board the dashboard refuses was invisible to this file.
+   * That happened: updates went out without `llmUsage`, the client dropped all
+   * of them, and the board froze on its connect snapshot while still reporting
+   * itself live.
+   *
+   * `llmUsage` is asserted explicitly rather than left to the schema, because it
+   * is the field that carries a *nullable object* — the shape most likely to be
+   * dropped by a serializer or a stale build, and the one a cast hides best.
+   */
+  it("keeps polled updates readable by the dashboard, not just the connect frame", async () => {
+    const restaurantId = newRestaurantId();
+    await ingest(restaurantId);
+
+    const { reader, abort } = await connect();
+    try {
+      // Correlation runs in the worker, so at connect there is a job and no
+      // finding. Everything asserted below therefore arrived on the poll path.
+      const connected = await firstBoard(reader);
+      expect(connected.findings).toEqual([]);
+
+      const outcome = await runJob(
+        `worker-${randomUUID().slice(0, 8)}`,
+        providerBusyDuring(() => Promise.resolve()),
+      );
+      expect(outcome).toBe("succeeded");
+
+      const board = await boardWhere(reader, (next) => next.findings[0]?.status === "ready");
+      expect(board.findings[0].restaurantId).toBe(restaurantId);
+      expect(board.findings[0].llmUsage).toEqual({
+        inputTokens: 1_200,
+        outputTokens: 300,
+        costMicrosUsd: 5_400,
+      });
     } finally {
       abort();
     }
