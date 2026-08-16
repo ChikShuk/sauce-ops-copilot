@@ -25,6 +25,7 @@ import { FORCE_FAIL_PREFIX } from "../../src/worker/processEvent";
 import { runJob } from "../../src/worker/runJob";
 import { evidenceFor, findingsFor, jobFor } from "../helpers/db";
 import { newRestaurantId } from "../helpers/factories";
+import { stubProvider } from "../helpers/providers";
 
 const AT = new Date("2026-08-14T20:10:00Z");
 const MAX_ATTEMPTS = 5;
@@ -145,7 +146,14 @@ describe("the failed branch of the status machine", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await makeClaimable(eventId);
-      expect(await runJob(`test-worker-${randomUUID().slice(0, 8)}`)).toBe("succeeded");
+      // The provider is injected because this is the *success* path: left out,
+      // enrichment resolves whatever LLM_PROVIDER names, so a developer with
+      // ANTHROPIC_API_KEY set turns a test about the demo trigger into a live
+      // API call — which timed out under full-suite load. The tests above never
+      // reach enrichment, so they need no stub.
+      expect(await runJob(`test-worker-${randomUUID().slice(0, 8)}`, stubProvider())).toBe(
+        "succeeded",
+      );
     } finally {
       logSpy.mockRestore();
     }

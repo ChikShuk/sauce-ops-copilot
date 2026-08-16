@@ -3,6 +3,7 @@ import { LLM_TIMEOUT_MS, MAX_LLM_ATTEMPTS } from "../config";
 import { env } from "../env";
 import { logJson } from "../log";
 import { EnrichmentValidationError, parseEnrichment } from "./parse";
+import { addUsage, priceUsage, totalInputTokens, ZERO_USAGE, type TokenUsage } from "./pricing";
 import { buildPrompt } from "./prompt";
 import { buildOutputJsonSchema } from "./schema";
 import type { Enrichment, EnrichmentInput, EnrichmentProvider } from "./types";
@@ -39,6 +40,29 @@ function getClient(): Anthropic {
     client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 0 });
   }
   return client;
+}
+
+/**
+ * Token counts off a response, or null if the field is absent.
+ *
+ * Typed as possibly-undefined against a type that says it is always there,
+ * because the cost of being wrong is asymmetric: a response missing `usage` is
+ * one whose accounting we cannot do, not one whose prose is unusable. Throwing
+ * here would discard a perfectly good summary over a billing detail, and the
+ * null flows through to a finding that shows the model mark without figures.
+ *
+ * The cache counters are nullable in the SDK's own type — they are absent on a
+ * request that used no caching, which is every request we make today.
+ */
+function readUsage(usage: Anthropic.Usage | undefined): TokenUsage | null {
+  if (!usage) return null;
+
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+  };
 }
 
 function extractText(content: Anthropic.ContentBlock[]): string {
@@ -78,10 +102,23 @@ async function enrich(input: EnrichmentInput): Promise<Enrichment> {
 
   let correction: string | null = null;
   let lastError: unknown = null;
+  // Accumulated across attempts, not read off the winning response. A rejected
+  // response is billed exactly like an accepted one, so charging the finding
+  // only for the attempt that happened to validate would understate what it
+  // cost — and would do so precisely on the findings that went wrong.
+  let spent: TokenUsage = ZERO_USAGE;
+  // Distinguishes "reported zero" from "reported nothing". Only the latter
+  // suppresses the figures downstream.
+  let spendKnown = false;
 
   for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt += 1) {
     try {
       const message = await callModel(system, user, correction);
+      const attemptUsage = readUsage(message.usage);
+      if (attemptUsage) {
+        spent = addUsage(spent, attemptUsage);
+        spendKnown = true;
+      }
 
       // A refusal is a decision, not a hiccup — regenerating the same request
       // would just spend the budget to be refused again.
@@ -101,6 +138,13 @@ async function enrich(input: EnrichmentInput): Promise<Enrichment> {
         ...parsed,
         source: "llm",
         model: message.model,
+        usage: spendKnown
+          ? {
+              inputTokens: totalInputTokens(spent),
+              outputTokens: spent.outputTokens,
+              costMicrosUsd: priceUsage(message.model, spent),
+            }
+          : null,
       };
     } catch (err) {
       lastError = err;
@@ -111,12 +155,18 @@ async function enrich(input: EnrichmentInput): Promise<Enrichment> {
         throw err;
       }
 
+      // Tokens are logged here as well as stored on the finding, because this
+      // is the one path where they never reach the finding: if the last attempt
+      // is also rejected we degrade to the fallback writer, which reports no
+      // usage. The spend is real either way and the log is where it survives.
       logJson({
         msg: "llm.response_rejected",
         finding_id: input.findingId,
         attempt,
         max_attempts: MAX_LLM_ATTEMPTS,
         reason: err.message,
+        input_tokens: totalInputTokens(spent),
+        output_tokens: spent.outputTokens,
       });
 
       correction = `${CORRECTION_PREFIX} Reason: ${err.message}`;

@@ -1,5 +1,6 @@
 import { desc, sql } from "drizzle-orm";
 import {
+  bigint,
   check,
   index,
   integer,
@@ -128,6 +129,22 @@ export const eventJobs = pgTable(
   ],
 );
 
+// Runtime demo overrides, not business data. One row per setting, read at the
+// point of use rather than at startup — which is the entire reason it exists:
+// the worker is a separate process, so a value it reads once at boot cannot be
+// changed from a browser without a restart.
+//
+// Generic key/value on purpose. A column per setting would mean a migration per
+// demo affordance, and nothing here outlives the demo.
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
 // Living, mutable, versioned entities. Correlation has no static key — a
 // finding is "open" while evidence keeps arriving for a restaurant within a
 // rolling window of the last event (see docs/decisions.md). issue_class is
@@ -175,6 +192,22 @@ export const findings = pgTable(
     // Which model wrote this prose. Needed to interpret a bad summary, and to
     // tell pre- from post-model-change rows apart. NULL on fallback rows.
     llmModel: text("llm_model"),
+    // What the model has cost this finding, summed over every enrichment it has
+    // had — a finding is enriched once per version, and all of them were spent
+    // on this one row.
+    //
+    // NULL, not 0, on a finding no model ever touched. The three columns move
+    // together and are written only by enrichFinding; nothing reads them except
+    // display. Cost is stored rather than derived from the token counts at
+    // render time because it is an accounting fact about a call that already
+    // happened, and must not restate itself when Anthropic changes a price —
+    // see llm/pricing.ts.
+    llmInputTokens: integer("llm_input_tokens"),
+    llmOutputTokens: integer("llm_output_tokens"),
+    // Integer micro-dollars (1e-6 USD). bigint because cents are too coarse for
+    // a sub-cent call and a float would drift the moment anything sums them.
+    // NULL also covers "model ran, but we hold no rate for it".
+    llmCostMicrosUsd: bigint("llm_cost_micros_usd", { mode: "number" }),
     // When the prose was written, which is not updated_at — correlation touches
     // that too. Display only.
     enrichedAt: timestamp("enriched_at", { withTimezone: true }),
@@ -292,6 +325,73 @@ export const operatorActions = pgTable(
     check(
       "operator_actions_action_type_check",
       sql`${table.actionType} in ('mark_reviewed', 'mark_resolved', 'thumbs_down', 'thumbs_up')`,
+    ),
+  ],
+);
+
+// The second queue: "rewrite this finding's prose", requested from the UI.
+//
+// A separate table rather than another event_jobs row, and the deciding reason
+// is semantic rather than structural. A dead-lettered event job marks its
+// finding failed — its evidence never made it into prose. A dead-lettered
+// re-enrichment must NOT: the prose already on the finding is still valid, and
+// the rewrite was an operator's optional request. Sharing the table would force
+// a branch exactly where runJob is currently unconditional.
+//
+// Structurally it also could not share: event_jobs.event_id is the primary key
+// precisely to enforce 1:1 with events (see above), so a second job per event is
+// impossible without discarding that guarantee.
+//
+// Every other column mirrors event_jobs deliberately — same status vocabulary,
+// same claim-token fencing, same backoff schedule — so the two queues read the
+// same way even though they are drained by separate statements.
+export const enrichmentJobs = pgTable(
+  "enrichment_jobs",
+  {
+    // A surrogate key, unlike event_jobs: a finding can legitimately be
+    // re-enriched many times over its life, so there is no 1:1 to enforce.
+    id: uuid("id").primaryKey().defaultRandom(),
+    findingId: uuid("finding_id")
+      .notNull()
+      .references(() => findings.id, { onDelete: "cascade" }),
+    // The version at the moment the operator asked, kept for the log line only.
+    // The worker re-reads the finding's current version when it claims the job,
+    // so the rewrite always describes the evidence that exists then.
+    requestedVersion: integer("requested_version").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimedBy: text("claimed_by"),
+    claimToken: uuid("claim_token"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    // At most one outstanding rewrite per finding — same partial-unique-index
+    // shape as findings_restaurant_id_open_key. A double click is then a no-op
+    // enforced by the database rather than by the button being disabled.
+    uniqueIndex("enrichment_jobs_finding_id_open_key")
+      .on(table.findingId)
+      .where(sql`${table.status} in ('pending', 'processing', 'failed')`),
+    index("enrichment_jobs_next_attempt_at_idx")
+      .on(table.nextAttemptAt)
+      .where(sql`${table.status} in ('pending', 'failed')`),
+    index("enrichment_jobs_processing_claimed_at_idx")
+      .on(table.claimedAt)
+      .where(sql`${table.status} = 'processing'`),
+    check(
+      "enrichment_jobs_status_check",
+      sql`${table.status} in ('pending', 'processing', 'succeeded', 'failed', 'dead_letter')`,
     ),
   ],
 );

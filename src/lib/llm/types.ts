@@ -35,6 +35,19 @@ export type RecommendedAction = {
   rationale: string;
 };
 
+// What one enrichment consumed, already priced. Null on any writer that spends
+// nothing (the fallback) or that reports no usage at all — distinct from zeros,
+// which would claim a model ran and cost nothing.
+export type EnrichmentUsage = {
+  // Every billed input token, cache reads and writes folded in. One number
+  // because "how many tokens did this cost me" is the operator's question; the
+  // breakdown only matters to the pricing rules, which have already run.
+  inputTokens: number;
+  outputTokens: number;
+  // Integer micro-dollars (1e-6 USD), or null for a model with no known rate.
+  costMicrosUsd: number | null;
+};
+
 export type Enrichment = {
   issue: string;
   summary: string;
@@ -46,6 +59,7 @@ export type Enrichment = {
   citedEventIds: string[] | null;
   source: "llm" | "fallback";
   model: string | null;
+  usage: EnrichmentUsage | null;
 };
 
 export type EnrichmentProvider = {

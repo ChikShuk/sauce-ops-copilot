@@ -24,8 +24,9 @@ export { FORCE_FAIL_PREFIX };
 // finding is a real problem an operator should see, and gets enriched like any
 // other.
 //
-// The provider is a parameter so tests can inject one; production takes the
-// env-selected default from getProvider().
+// The provider is a parameter so tests can inject one; production leaves it
+// undefined and enrichFinding resolves the one currently in force — the
+// LLM_PROVIDER default, or the runtime override behind the dashboard toggle.
 export async function processEvent(
   event: EventRow,
   provider?: EnrichmentProvider,

@@ -15,6 +15,7 @@ import type {
   FindingCard,
   FindingDetail,
   FindingStatus,
+  LlmUsage,
   OperatorActionRecord,
   QueueCounts,
   RecommendedAction,
@@ -109,6 +110,9 @@ type CardRow = {
   issue: string | null;
   has_summary: boolean;
   summary_source: string | null;
+  llm_input_tokens: number | string | null;
+  llm_output_tokens: number | string | null;
+  llm_cost_micros_usd: number | string | null;
   extracted_tags: unknown;
   event_count: number;
   first_event_at: unknown;
@@ -123,6 +127,30 @@ type CardRow = {
   retry_max_attempts: number | null;
   retry_next_attempt_at: unknown;
 };
+
+// bigint arrives from postgres.js as a string, integer as a number. Both are
+// well inside the safe-integer range here — a million dollars is 1e12 micros —
+// so a single Number() is correct for either.
+function toNumberOrNull(value: number | string | null): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// The three columns are written together and are null together on a finding no
+// model has touched. Tokens are what makes the record exist — cost can be null
+// on its own when the model that ran has no rate on file.
+function toUsage(row: CardRow): LlmUsage | null {
+  const inputTokens = toNumberOrNull(row.llm_input_tokens);
+  const outputTokens = toNumberOrNull(row.llm_output_tokens);
+  if (inputTokens === null || outputTokens === null) return null;
+
+  return {
+    inputTokens,
+    outputTokens,
+    costMicrosUsd: toNumberOrNull(row.llm_cost_micros_usd),
+  };
+}
 
 function toCard(row: CardRow): FindingCard {
   return {
@@ -139,6 +167,7 @@ function toCard(row: CardRow): FindingCard {
       row.summary_source === "llm" || row.summary_source === "fallback"
         ? row.summary_source
         : null,
+    llmUsage: toUsage(row),
     extractedTags: parseStringArray(row.extracted_tags),
     eventCount: row.event_count,
     firstEventAt: toIso(row.first_event_at),
@@ -163,7 +192,8 @@ function toCard(row: CardRow): FindingCard {
 const CARD_COLUMNS = sql`
   f.id, f.restaurant_id, f.order_id, f.version, f.status, f.priority,
   f.priority_drivers, f.issue, (f.summary IS NOT NULL) AS has_summary,
-  f.summary_source, f.extracted_tags,
+  f.summary_source, f.llm_input_tokens, f.llm_output_tokens,
+  f.llm_cost_micros_usd, f.extracted_tags,
   f.event_count, f.first_event_at, f.last_event_at, f.enriched_at,
   f.enriched_version, f.updated_at, f.closed_at, f.reviewed_at, f.resolved_at
 `;

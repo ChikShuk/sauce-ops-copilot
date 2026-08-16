@@ -8,12 +8,19 @@ import { claimJob } from "../lib/queue/claimJob";
 import { markFailed } from "../lib/queue/markFailed";
 import { markSucceeded } from "../lib/queue/markSucceeded";
 import { processEvent } from "./processEvent";
+import { runEnrichmentJob } from "./runEnrichmentJob";
 
 export type RunJobOutcome = "idle" | "succeeded" | "failed" | "dead_lettered";
 
 // One iteration of the worker loop, extracted so the failure path can be tested
 // as it actually ships rather than re-implemented in a test. index.ts owns the
 // looping, sleeping, and shutdown; this owns claim-to-disposition.
+//
+// Two queues are drained here, and the order is a fairness decision rather than
+// an implementation detail: event jobs are always claimed first, so an operator
+// clicking "Re-write summary" on a backlog of unprocessed events cannot delay
+// the events themselves. Ingestion is the product; the rewrite queue is a demo
+// control, and it waits. 'idle' therefore means both queues are empty.
 export async function runJob(
   workerId: string,
   provider?: EnrichmentProvider,
@@ -21,7 +28,7 @@ export async function runJob(
   const claimed = await claimJob(workerId);
 
   if (!claimed) {
-    return "idle";
+    return runEnrichmentJob(workerId, provider);
   }
 
   // Claiming pushed a crash-looped job past its retry budget. Skip the handler

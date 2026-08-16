@@ -71,6 +71,27 @@
       "when": 1786747898284,
       "tag": "0009_fuzzy_fabian_cortez",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786855036315,
+      "tag": "0010_eminent_valkyrie",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786894452560,
+      "tag": "0011_famous_mulholland_black",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786894600000,
+      "tag": "0012_set_updated_at_triggers_runtime",
+      "breakpoints": true
     }
   ]
 }

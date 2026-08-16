@@ -56,3 +56,38 @@ export async function findRepairTarget(findingId: string): Promise<RepairTarget 
     drivers: parsePriorityDrivers(rows[0].priority_drivers),
   };
 }
+
+/**
+ * The same read without the staleness predicate, for an operator-requested
+ * rewrite.
+ *
+ * A re-enrichment is asked for precisely when the prose is *not* stale — the
+ * evidence has not changed and the operator wants to see it described by the
+ * other provider. Reading the version here, at claim time rather than at request
+ * time, is what keeps the fence in enrichFinding meaningful: the rewrite is
+ * scoped to the evidence that exists when it actually runs, and if correlation
+ * commits new evidence in between, the fenced write finds zero rows and the
+ * newer enrichment wins.
+ *
+ * Null when the finding is gone — a rewrite queued for a deleted finding is a
+ * no-op, not a failure.
+ */
+export async function readEnrichmentTarget(findingId: string): Promise<RepairTarget | null> {
+  const rows = await db.execute<{
+    version: number;
+    priority_drivers: unknown;
+  }>(sql`
+    SELECT version, priority_drivers
+    FROM findings
+    WHERE id = ${findingId};
+  `);
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return {
+    version: rows[0].version,
+    drivers: parsePriorityDrivers(rows[0].priority_drivers),
+  };
+}

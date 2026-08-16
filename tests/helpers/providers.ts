@@ -25,6 +25,11 @@ export function stubProvider(
         citedEventIds: input.evidence.slice(0, 1).map((item) => item.eventId),
         source: "llm",
         model: "stub-model-1",
+        // Fixed rather than random so a test can assert the exact numbers that
+        // reach the finding. The model name is deliberately not in the rate
+        // table, which is what makes `costMicrosUsd` here a stand-in for the
+        // priced-elsewhere case rather than a duplicate of the pricing rules.
+        usage: { inputTokens: 1_200, outputTokens: 300, costMicrosUsd: 5_400 },
         ...overrides,
       });
     },
@@ -103,7 +108,12 @@ export function rawTextProvider(raw: string): StubProvider {
 
       const labelToEventId = new Map(input.evidence.map((item) => [item.label, item.eventId]));
       const parsed = parseEnrichment(raw, labelToEventId);
-      return Promise.resolve({ ...parsed, source: "llm", model: "raw-text-model" });
+      return Promise.resolve({
+        ...parsed,
+        source: "llm",
+        model: "raw-text-model",
+        usage: { inputTokens: 900, outputTokens: 200, costMicrosUsd: null },
+      });
     },
   };
 }

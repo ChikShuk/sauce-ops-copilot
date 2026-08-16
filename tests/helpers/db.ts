@@ -23,8 +23,12 @@ export async function eventRowById(id: string): Promise<EventRow> {
 // footgun. Naming every table in a single TRUNCATE satisfies the FK checks.
 export async function resetDb(): Promise<void> {
   await db.execute(
-    sql`TRUNCATE operator_actions, finding_events, findings, event_jobs, events;`,
+    sql`TRUNCATE operator_actions, finding_events, findings, enrichment_jobs, event_jobs, events;`,
   );
+  // Not part of the TRUNCATE above: app_settings has no foreign key to any of
+  // those, and it carries the provider override — a row one test writes would
+  // otherwise silently choose the provider for every test that follows.
+  await db.execute(sql`TRUNCATE app_settings;`);
 }
 
 export type FindingRow = {

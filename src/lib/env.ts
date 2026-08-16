@@ -21,6 +21,18 @@ const envSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
+    // The other demo affordance: with this on, the dashboard can switch the
+    // enrichment provider at runtime (a row in app_settings overriding
+    // LLM_PROVIDER) and ask for a finding's prose to be rewritten. Off by
+    // default in code, on in .env.example.
+    //
+    // In production, provider selection is deployment config — a control that
+    // lets anyone with the dashboard open change what the whole system spends
+    // money on is a demo device, not a feature.
+    ENABLE_PROVIDER_TOGGLE: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
   })
   .superRefine((env, ctx) => {
     if (env.LLM_PROVIDER === "anthropic" && !env.ANTHROPIC_API_KEY) {

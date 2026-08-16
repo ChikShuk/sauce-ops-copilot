@@ -1,3 +1,4 @@
+import { formatDuration } from "../format";
 import { MAX_RECOMMENDED_ACTIONS } from "./schema";
 import type { ExtractedTag, RecommendedActionType } from "./schema";
 import type { Enrichment, EnrichmentInput, EnrichmentProvider } from "./types";
@@ -59,12 +60,31 @@ function buildIssue(input: EnrichmentInput, issueClass: string | null): string {
   return `${label} (${input.eventCount} ${plural})`;
 }
 
+/**
+ * The sentence that marks a summary as the degraded path.
+ *
+ * Exported so the dashboard can lift it back out and render it as a footnote
+ * instead of prose — matching on this constant rather than on a regex means the
+ * two can never drift apart.
+ */
+export const FALLBACK_DISCLOSURE =
+  "This summary was generated without the AI model, so it restates the evidence rather than interpreting it. The finding, its evidence, and its priority are unaffected.";
+
 function buildSummary(input: EnrichmentInput, issueClass: string | null): string {
   const label = issueClass ? (ISSUE_CLASS_LABELS[issueClass] ?? "operational issues") : "activity";
   const plural = input.eventCount === 1 ? "event" : "events";
 
+  // How long the evidence spans, not when it happened. This prose is written
+  // once, in a worker, and then stored — so any absolute clock time baked into
+  // it is frozen in the writer's timezone (UTC) and cannot follow the operator
+  // reading it. A duration carries the same "is this a burst or a slow bleed?"
+  // signal with no timezone in it at all, and the exact window is a line above
+  // the summary on the panel, rendered client-side in the viewer's own zone.
+  const span = formatDuration(input.firstEventAt, input.lastEventAt);
+  const window = input.eventCount > 1 && span !== "under a minute" ? ` over ${span}` : "";
+
   const sentences = [
-    `${input.eventCount} related ${plural} between ${input.firstEventAt.toISOString()} and ${input.lastEventAt.toISOString()}, mostly ${label.toLowerCase()}.`,
+    `${input.eventCount} related ${plural}${window}, mostly ${label.toLowerCase()}.`,
   ];
 
   if (input.drivers.length > 0) {
@@ -77,9 +97,7 @@ function buildSummary(input: EnrichmentInput, issueClass: string | null): string
   // Say plainly that this is the degraded path. An operator reading a thin
   // summary should know it is thin because the model was unavailable, not
   // because there is little to say.
-  sentences.push(
-    "This summary was generated without the language model, so it restates the evidence rather than interpreting it. The finding, its evidence, and its priority are unaffected.",
-  );
+  sentences.push(FALLBACK_DISCLOSURE);
 
   return sentences.join(" ");
 }
@@ -119,6 +137,10 @@ export function writeFallbackEnrichment(input: EnrichmentInput): Enrichment {
     citedEventIds: null,
     source: "fallback",
     model: null,
+    // Not zeros. This writer never called a model, so it has no usage to
+    // report — and a stored `0 tokens, $0.00` would read as a model call that
+    // happened to be free rather than as one that never happened.
+    usage: null,
   };
 }
 

@@ -34,6 +34,9 @@ function message(text: string, overrides: Record<string, unknown> = {}) {
     model: "claude-sonnet-5",
     stop_reason: "end_turn",
     content: [{ type: "text", text }],
+    // Every real response carries usage. Fixed numbers so the cost assertions
+    // below are exact rather than "some positive figure".
+    usage: { input_tokens: 1_200, output_tokens: 300 },
     ...overrides,
   };
 }
@@ -205,6 +208,66 @@ describe("anthropicProvider", () => {
     await anthropicProvider.enrich(input);
 
     expect(constructorArgs.at(-1)).toMatchObject({ maxRetries: 0 });
+  });
+
+  // The exact money is asserted in pricing.test.ts against explicit dates —
+  // claude-sonnet-5 is on introductory pricing until 2026-09-01, so pinning
+  // micro-dollars to wall-clock time here would plant a test that passes today
+  // and fails in September. What belongs here is the token bookkeeping and the
+  // fact that a known model comes back priced at all.
+  it("reports what the call spent, priced for the model that answered", async () => {
+    create.mockResolvedValueOnce(message(validBody));
+
+    const enrichment = await anthropicProvider.enrich(input);
+
+    expect(enrichment.usage?.inputTokens).toBe(1_200);
+    expect(enrichment.usage?.outputTokens).toBe(300);
+    expect(enrichment.usage?.costMicrosUsd).toBeGreaterThan(0);
+  });
+
+  it("bills the rejected attempt too, not just the one that validated", async () => {
+    // The whole point of accumulating: a finding that took two attempts cost
+    // twice as much, and charging it for the winner alone would understate the
+    // findings that went wrong — exactly the ones worth noticing.
+    create.mockResolvedValueOnce(message("not json at all"));
+    create.mockResolvedValueOnce(message(validBody));
+
+    const enrichment = await anthropicProvider.enrich(input);
+
+    expect(enrichment.usage?.inputTokens).toBe(2_400);
+    expect(enrichment.usage?.outputTokens).toBe(600);
+  });
+
+  it("folds cache reads and writes into the input count", async () => {
+    // Nothing sets cache_control today, so these arrive absent rather than
+    // zero. Counted anyway so turning caching on later does not silently
+    // under-report every finding on the board.
+    create.mockResolvedValueOnce(
+      message(validBody, {
+        usage: {
+          input_tokens: 200,
+          output_tokens: 100,
+          cache_creation_input_tokens: 1_000,
+          cache_read_input_tokens: 4_000,
+        },
+      }),
+    );
+
+    const enrichment = await anthropicProvider.enrich(input);
+
+    expect(enrichment.usage?.inputTokens).toBe(5_200);
+  });
+
+  it("still returns the prose when the response reports no usage at all", async () => {
+    // Asymmetric costs: a missing billing field must not throw away a summary
+    // that is otherwise perfectly good. The finding shows the model mark
+    // without figures rather than degrading to the template writer.
+    create.mockResolvedValueOnce(message(validBody, { usage: undefined }));
+
+    const enrichment = await anthropicProvider.enrich(input);
+
+    expect(enrichment.source).toBe("llm");
+    expect(enrichment.usage).toBeNull();
   });
 
   it("constrains the response with a json_schema and low effort", async () => {

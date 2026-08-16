@@ -90,7 +90,7 @@ describe("enrichment: failure is survivable", () => {
     expect(provider.calls).toHaveLength(1);
     expect(finding.status).toBe("ready");
     expect(finding.summary_source).toBe("fallback");
-    expect(finding.summary).toContain("without the language model");
+    expect(finding.summary).toContain("without the AI model");
     expect(finding.llm_model).toBeNull();
   });
 

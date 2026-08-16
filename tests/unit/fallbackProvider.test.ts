@@ -74,7 +74,7 @@ describe("writeFallbackEnrichment", () => {
   });
 
   it("says plainly that it is the degraded path", () => {
-    expect(writeFallbackEnrichment(input()).summary).toContain("without the language model");
+    expect(writeFallbackEnrichment(input()).summary).toContain("without the AI model");
   });
 
   it("stays inside the action allowlist and the action cap", () => {
