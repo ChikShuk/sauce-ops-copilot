@@ -4,12 +4,6 @@ Real-time restaurant operations copilot: ingests operational events, correlates 
 into findings, and surfaces AI-generated summaries and recommended actions on a live
 dashboard.
 
-> **Note to self — delete this block before submitting.**
-> Each section below is tagged `<!-- OWNER: agent | slice: N -->` or
-> `<!-- OWNER: design-chat -->`. The agent fills its sections during the slice-done ritual.
-> Human-owned sections are judgment calls and must be written by me, in my own voice.
-> A section still containing `_TODO_` at submission time is a bug.
-
 ---
 
 ## Quick start
@@ -149,6 +143,25 @@ expanded, and re-fetched when that finding's `version` or `status` moves.
 ### Data flow
 <!-- OWNER: agent | slice: 6 -->
 
+<!--
+  The image is the diagram; the Mermaid source below it is the editable original.
+  GitHub renders Mermaid client-side and does not always fire on first paint — the
+  section can come up empty until you expand it — so the committed SVG is what
+  guarantees the diagram is actually visible. Regenerate after editing the source:
+
+    npx @mermaid-js/mermaid-cli -i <source>.mmd -o docs/architecture.svg \
+      -c '{"securityLevel":"strict","htmlLabels":false,"flowchart":{"htmlLabels":false}}' \
+      -b white
+
+  htmlLabels MUST stay false: with it on, Mermaid emits <foreignObject> and an SVG
+  referenced as an <img> renders the boxes with no text at all.
+-->
+
+![Data flow from event ingestion to dashboard render. An operator or simulator POSTs an event to the ingestion API, which validates, normalizes and derives issue_class, writes the event and its job row to Postgres in one statement, and returns immediately with a duplicate flag. A worker claims the job with SELECT FOR UPDATE SKIP LOCKED, runs correlation and priority rules — both deterministic, shown in green — and commits the finding with its evidence, priority and drivers before any model is involved. Enrichment then sends the evidence to Anthropic as opaque labels E1..En; the structured response is checked against the schema, the action allowlist and the citation set — shown in amber — and either writes the prose fenced on findings.version or falls through to the deterministic fallback writer, as does any timeout or outage. Exhausted retries dead-letter and mark the finding failed. A broadcaster polls Postgres once a second and pushes the whole board plus changed ids over SSE to the dashboard, where a reconnect is a fresh snapshot.](docs/architecture.svg)
+
+<details>
+<summary>Mermaid source for the diagram above</summary>
+
 ```mermaid
 flowchart TD
     SIM["Operator / simulator"] -->|POST event| API["Ingestion API<br/>validate · normalize · derive issue_class"]
@@ -183,6 +196,8 @@ flowchart TD
     class CORR,PRI det
     class LLM,VAL model
 ```
+
+</details>
 
 Green is deterministic, amber is the model. The finding exists, is prioritized, and has its
 evidence before the amber path is entered — and every route out of the amber path, success
@@ -1104,35 +1119,89 @@ These are deliberate scope decisions, not oversights. Each one is a place where 
 ## Product and entrepreneurial judgment
 <!-- OWNER: design-chat -->
 
-_The eleven questions from the brief. Answer each in 2–4 sentences._
+**Who is the primary user?**
 
-- **Who is the primary user?** _TODO_
-- **What decision does the dashboard help them make?** _TODO_
-- **What assumptions did you make?** _TODO_
-- **What did you intentionally leave out?** _TODO_
-- **What is the smallest version worth releasing?** _TODO_
-- **What is the first product metric you would track?** _TODO_
-- **What is the largest product risk?** _TODO_
-- **What would you validate with five restaurant operators?** _TODO_
-- **What would make you stop investing in the product?** _TODO_
-- **What would you build next if adoption were strong?** _TODO_
-- **What did you change or improve beyond the literal assignment?** _TODO_
+A shift manager during service, someone who needs to act on a problem now, not analyze it later. The board is built around that: one screen, priority sorted, no filters or date ranges, nothing that assumes you have time to set something up. Right now there is no auth or tenant scoping, so it works more like a small-chain operations dashboard. I left auth out because it was outside the brief, while the database already keeps restaurants properly separated: event IDs are scoped per restaurant, and findings never mix events from different ones. What is missing is the login that decides who gets to see which.
+
+**What decision does the dashboard help them make?**
+
+What to deal with first. That's why priority comes before recency, and why the card leads with facts the system computed rather than the AI summary: those are the parts an operator can trust without checking. The statuses matter for the same reason. "Still being analyzed" and "nothing wrong here" must not look alike, or the board stops being believable the first time it falls behind.
+
+**What assumptions did you make?**
+
+The main assumption is that a finding means "something is wrong at this restaurant right now," not "something is wrong with this specific order." So when the system decides whether two events belong together, it only looks at which restaurant they came from and how close in time they are. It never looks at the order number, even though the order number is stored and shown on the card. That came from the brief's own example, where a delay, a complaint on the same order, and a review with no order at all are all evidence of one finding.
+
+The three-hour window and the priority thresholds are reasonable starting points, but they would need real restaurant data to tune properly.
+
+One smaller assumption worth naming: events are treated as immutable, but that is a convention rather than a constraint. The thumbs-down feedback stores evidence by reference rather than copying it, so if an update path were ever added, old feedback would quietly start pointing at different input than the operator actually judged.
+
+**What did you intentionally leave out?**
+
+Auth and tenant isolation, backpressure, per-tenant spend limits, an eval harness, and browser tests. I also avoided Redis, because Postgres already handles the queue, the idempotency and the concurrency control inside one transactional boundary, which is what makes "event saved but never queued" impossible rather than just recoverable. Adding a second datastore would have bought a capability I already had. I left out thumbs-up because on its own it changes nothing and tells you nothing you can act on.
+
+Each of these is covered in more detail in the Known limitations section, including what leaving it out actually costs.
+
+**What is the smallest version worth releasing?**
+
+The current product running with `LLM_PROVIDER=fallback`. It still correlates events, prioritizes findings, shows evidence, and updates in real time. The only difference is that the summaries are templated instead of AI generated. That proves the core product doesn't depend on the LLM to be useful.
+
+**What is the first product metric you would track?**
+
+The percentage of findings operators actually act on during the shift. Number of events or findings doesn't tell me whether the product is useful. Action rate does. After that, I'd track how long it takes from the first event to the first operator action.
+
+**What is the largest product risk?**
+
+That the dashboard tells operators things they already know. A manager probably already knows an order is 95 minutes late. The real value has to come from finding patterns they couldn't easily see, like repeated missing-item complaints or delays connected to the same courier. If operators aren't acting on findings, that's a strong sign we're not providing enough new information.
+
+**What would you validate with five restaurant operators?**
+
+First, whether a finding is even the right unit. Do they think about problems as restaurant incidents or individual orders? Then I'd validate the three-hour correlation window, the priority rules, whether the recommended actions match how they actually work, and whether they prefer occasionally merging unrelated events or splitting related events into separate findings.
+
+**What would make you stop investing in the product?**
+
+If operators consistently see findings but don't act on them. I'd also reconsider the AI layer if operators always need to check the evidence before trusting the summary. At that point the AI is adding work instead of removing it, and the deterministic system may be more valuable on its own.
+
+**What would you build next if adoption were strong?**
+
+**Hybrid correlation.** Right now code decides which events belong together, using rules. Those rules miss connections a person would spot: two complaints four hours apart that both say the driver was rude are one problem, but the rules only see restaurant and time, so they become two findings. So keep the rules, and let the model suggest extra merges the rules missed. But it only suggests. An operator clicks yes before anything is grouped. The AI never silently changes what's on the board, because grouping is the foundation everything else sits on and it has to stay predictable.
+
+**An eval system built from thumbs-down feedback.** Every time an operator flags a summary as unhelpful, the system already saves the exact prose they rejected and the events behind it. Collect a hundred of those and you have a test set: change the prompt, re-run it against them, and see whether the answers would now be acceptable. Right now I'd just be guessing.
+
+**Notifications.** Right now someone has to be looking at the screen. Notifications push the urgent findings to them instead.
+
+**What did you change or improve beyond the literal assignment?**
+
+I added a runtime provider toggle and summary rewrite so the AI boundary can actually be demonstrated. I added token and cost tracking, a `stale` connection state so the UI clearly shows when live updates stop, and a measured comparison between models based on latency, tokens, and cost. I also strengthened the testing process so important failure tests are verified by intentionally reintroducing the bug and making sure the test actually fails.
 
 ---
 
 ## What I would do with one more day
 <!-- OWNER: design-chat -->
 
-_TODO_ — specific and prioritized, not a wish list. Eval harness on a golden set of
-event bundles is the strongest candidate.
+**An eval harness.** The biggest gap. Summary quality is the product's value and it is currently unmeasured, so I cannot tell whether a prompt change made things better or worse. I would build a fixed set of around twenty findings, run the model against them, and score the output. The thumbs-down feedback already stores what was rejected, the evidence behind it, and which model wrote it, so it seeds this directly.
+
+**Browser tests.** Nothing in the suite touches the UI. Three real defects were found by looking at the rendered result instead of by a test: an accordion clipping the action buttons, a styling utility silently deleting the type scale, and a missing field that crashed the whole board. A handful of browser tests would have caught all three.
+
+**A check against the live model.** The suite deliberately cannot reach the real API, which keeps it fast and free but leaves one class of regression invisible: a model that stops following the prompt fails nothing. That needs an eval with a pass threshold rather than a unit test, since the model varies run to run.
 
 ---
 
 ## What I would change before production
 <!-- OWNER: design-chat -->
 
-_TODO_ — real broker or partitioned queue, per-tenant rate limits and spend caps,
-auth and tenant isolation, observability, LLM cost controls, reconciliation job.
+**The queue.** Postgres as a queue is right at this scale and I would keep it longer than most people expect. At sustained volume I would move to a real broker or partition the job table. The polling interval also sets a floor on how fast anything starts processing.
+
+**Fairness between tenants.** There is one queue shared by everyone, like a single line at a counter. At 9:00 one restaurant sends 100,000 events and they all join the line. At 9:01 another sends a single event, and it lands at position 100,001. The worker always serves the front of the line, so at 50 jobs a second that single event waits about 35 minutes. Nothing is broken; "oldest first" is just unfair when one customer can flood the line. I would take turns between restaurants instead, so no one gets stuck behind someone else's backlog.
+
+**Spend control.** Nothing caps total model cost. I would add a concurrency limit on the provider and a per-restaurant daily budget that falls back to the templated writer when exhausted. That fallback already exists for outages, it just is not wired to a budget.
+
+**Backpressure.** The API accepts events indefinitely and the queue just grows. I would add a queue depth ceiling per restaurant that returns 429 instead.
+
+**Auth and tenant isolation.** The database already separates restaurants. What is missing is the login that decides who sees which, and the check that stops anyone posting as anyone.
+
+**Remove the demo affordances.** The forced failure trigger, the provider toggle, and the cost figure on the card exist so a reviewer can see the system work. In production, provider choice is deployment config and cost belongs on an internal ops view.
+
+**Observability.** Structured logs with correlation IDs exist. Metrics, tracing, and alerting do not. A queue quietly falling behind should page someone rather than be noticed by an operator.
 
 ---
 

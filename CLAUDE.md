@@ -333,7 +333,7 @@ Keep these in view; they are explicitly required:
 - [ ] "What I would change before production"
 - [x] Disclosure of AI coding tool usage
 - [x] Working Docker container, no manual configuration
-- [ ] No `_TODO_` markers remain in README.md
+- [x] No `_TODO_` markers remain in README.md
 
 ---
 
