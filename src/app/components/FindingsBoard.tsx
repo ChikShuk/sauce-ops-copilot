@@ -321,7 +321,7 @@ export function FindingsBoard({
             This reverses an earlier call — the cards used to scroll with the
             list, on the reasoning that an expanded row is tall and pinned chrome
             eats the space it needs. That reasoning was not wrong; it is
-            outweighed now the expanded panel is five stacked cards, where losing
+            outweighed now the expanded panel is four stacked cards, where losing
             the queue counts means losing them for the whole time you are reading
             one finding.
 

@@ -272,8 +272,10 @@ produces exactly one `events` row, one `event_jobs` row, and zero additional wri
 to either (verified directly against the running database, not just asserted). The
 response is `{status: "accepted", duplicate: boolean, id}` in both the new and
 duplicate cases, so a caller can tell "created" from "already existed" without a
-second request. Worker-side idempotency — checking `event_jobs.status` before
-processing a claimed row — is slice 3's job and isn't built yet.
+second request. Worker-side idempotency is the claim statement transitioning the row it
+claims, plus correlation's own redelivery guard — a `SELECT` on `finding_events` before
+any write, so a redelivered event leaves the finding byte-identical rather than bumping
+its version. See "Partial failure" below.
 
 ### Correlation and finding lifecycle
 <!-- slice: 4 -->
@@ -1137,6 +1139,99 @@ auth and tenant isolation, observability, LLM cost controls, reconciliation job.
 ## AI tool usage disclosure
 <!-- OWNER: design-chat, with agent supplying the factual record -->
 
-_TODO_ — which tools, what they did, what I decided, how I verified their output.
-Reference `CLAUDE.md` and `.claude/commands/` as evidence of deliberate setup, and
-the git history for the working record.
+AI assistance is disclosed here rather than hidden, and the repository is set up so the
+claim is checkable rather than asserted: `CLAUDE.md`, `.claude/commands/slice-done.md`,
+`docs/decisions.md` and the commit history are the working record.
+
+**Two Claudes, with different jobs.** A design-review chat planned and pressure-tested each
+slice *before any code existed* — schema shapes, failure modes, what the alternatives cost.
+Claude Code then implemented in the repository, ran the verification, and committed. The
+split matters because the two failure modes differ: a planning chat argues you into a design
+and cannot tell you it does not compile, while an implementing agent will happily build a
+design nobody stress-tested. Keeping them separate meant each was checking the other's
+characteristic weakness.
+
+**The setup was deliberate.** `CLAUDE.md` fixes the architectural invariants the agent may
+not change without asking, the build order, the coding conventions, and the git rules.
+`.claude/commands/slice-done.md` defines a ritual — lint, typecheck, test, ADR entry, README
+update, commit — so that finishing a slice means the same thing every time rather than
+whatever seemed reasonable that hour. `docs/decisions.md` was written *while* decisions were
+made, not reconstructed afterwards, which is why it records rejected alternatives and not
+just outcomes. The `Co-Authored-By: Claude Opus 5` trailer marks the commits where Claude
+Code authored changes in this repository; it carries no claim about the prose, some of which
+was drafted in the design chat and edited by me. The `<!-- OWNER: -->` comments in this file
+are what identify which is which.
+
+**What plan review actually caught, before code existed.** These are the cases where the
+design was wrong and would have been expensive to unwind later:
+
+- **The correlation key.** The first design keyed findings on `order_id`, or on
+  `restaurant + issue_class + time bucket`. Both split the assignment's *own* worked example
+  — a mixed-type incident spanning 2h15m — into two or three separate findings. Reviewing the
+  design against the brief's expected output, rather than against itself, is what surfaced
+  it. The result is that `findings` has no `issue_class` column at all.
+- **The duplicate-response upsert.** Returning the existing row's id on a duplicate was going
+  to use the standard `ON CONFLICT ... DO UPDATE SET x = x RETURNING id, (xmax = 0)` trick.
+  It works, and it writes a new row version on every duplicate — taking a row lock and
+  creating a dead tuple in a table documented as immutable and append-only. The assignment's
+  own failure test is "submit the same event five times", which would have produced five row
+  versions of a row meant never to be touched again.
+- **The unbounded `occurred_at`.** A client error putting a timestamp a year in the future
+  would create a finding whose rolling window never lapses — so it never closes, and the
+  partial unique index means it silently absorbs every subsequent event at that restaurant,
+  forever. A validation bound two tables away from the constraint it protects.
+- **`issue_class` as a copy of `event_type`.** The first draft derived one from the other with
+  no transformation for three of four event types — two columns holding identical strings,
+  which any reviewer would notice and ask about.
+- **The undiagnosable dead letter.** Claim-time dead-lettering was going to leave `last_error`
+  untouched, so a crash-looped job would arrive in the DLQ carrying either a stale message or
+  nothing at all.
+
+**The verification discipline came out of being wrong.** Three times a green test meant
+nothing: a concurrency test whose race never fired because the transactions serialized; a
+reconnect test that asserted on a later poll tick, which refreshed the stale board it was
+supposed to catch; and a helper with a dead condition (`const before = messages.length; if
+(messages.length > before)`) that passed since slice 6 for an unrelated reason. All three sat
+inside covered, passing tests. The standard that emerged — recorded in `docs/decisions.md`
+and demonstrated above with real diffs and real failure output — is that a test claiming to
+prove a failure path is verified by **reintroducing the bug and confirming it goes red**.
+That standard has since caught two more classes: a contract test that read its payload
+through an `as` cast agreed with the server no matter what the server sent, and a Docker
+verification that proved the model path while claiming to prove the no-model path, because
+Compose had quietly supplied a real API key from a `.env`.
+
+**Where AI assistance produced defects that review did not catch.** This is the honest half,
+and it is the more useful one:
+
+- A comment block written *inside* a SQL template literal, where `//` is literal text rather
+  than a comment. It produced invalid SQL and broke every ingestion request until slice 3
+  (`0f6a921`). Lint and typecheck were green throughout — neither reads SQL inside a string.
+- `claimed_at` used as a fencing token. Postgres stores microseconds; the value round-trips
+  through a JS `Date` and back out truncated to milliseconds, so the equality check *never*
+  matched. Every disposition write updated zero rows and returned normally. It surfaced only
+  because a verification script asserted the row's post-state rather than that the call had
+  not thrown.
+- An SSE cache served to reconnecting clients, showing a finding as `accepted` that the worker
+  had already marked `failed` — found by disconnecting and reconnecting against a live worker,
+  not by reading the code.
+- A dropped `llmUsage` key crashing the entire board in the browser: a chip showing token
+  spend took down the priority, evidence and status that the whole architecture argues are
+  independent of the model.
+- An accordion that pinned its own content height, clipping the operator action buttons
+  entirely. Found by looking at a screenshot.
+- `tailwind-merge` silently deleting the type scale wherever a size and a colour were
+  combined. Typecheck, lint and build were all green with the bug present.
+- This README claiming an automated live-model test layer that did not exist. Both live
+  verifications had been manual.
+- The architecture diagram rendering as raw source on GitHub for want of three `<i>` tags,
+  found by looking at the rendered page rather than by anything in the repo.
+- Tip copy advertising a 35-minute delay and a 2-star review that went stale *inside the same
+  commit* that changed those values, because the new test pinned the payload and nothing
+  pinned the prose describing it.
+
+The pattern across all of them is the same and worth stating plainly: **AI assistance is
+strong at producing something that compiles, passes its own tests, and reads well, and weak at
+noticing that the thing it produced is not connected to reality.** Almost every defect above
+was found by running the system, looking at the rendered result, or wiping the state and
+starting clean — not by review and not by the type system. That is where the human time went,
+and it is the part I would not delegate.

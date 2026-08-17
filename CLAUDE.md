@@ -71,25 +71,67 @@ outbox and a relay is added at that seam — document this in the README.
 
 ### 4. Idempotency at two layers.
 
-- **Ingestion:** unique constraint on `event_id`. Duplicate returns `{status: "accepted"}`
-  without creating new work. The UI must visibly show it was recognized as a duplicate.
+- **Ingestion:** `UNIQUE (restaurant_id, event_id)` on `events` — tenant-scoped, not a
+  global unique on `event_id`, since the key is client-supplied and two tenants must be
+  able to use the same one. Duplicate returns `{status: "accepted"}` without creating new
+  work. The UI must visibly show it was recognized as a duplicate.
 - **Worker:** the consumer checks processing state before doing work, so redelivery of
   the same message is safe.
 
+*Revised during slice 1: this originally said a global unique on `event_id`, which is a
+real multi-tenancy bug — cheap to get right up front, expensive once ids actually collide.
+See `docs/decisions.md`, 2026-08-14, "Tenant-scoped event idempotency key".*
+
 ### 5. Findings are living entities, not per-event artifacts.
 
-A finding is keyed on a correlation key (order_id when present; otherwise
-restaurant + issue class + time window). New evidence **updates** the existing finding
-and bumps its version. This is what makes out-of-order arrival and real-time updates
-fall out naturally instead of being bolted on.
+**There is no static correlation key.** A finding is *open* while evidence keeps arriving
+for a restaurant, and an event joins it when `occurred_at` falls within
+`CORRELATION_WINDOW_MS` (3h) of the nearest edge of that finding's existing evidence:
+
+```sql
+occurred_at BETWEEN first_event_at - INTERVAL '3 hours'
+                AND last_event_at  + INTERVAL '3 hours'
+```
+
+The predicate is **bidirectional** on purpose — an event that arrives late but *happened*
+earlier still attaches and pulls `first_event_at` backwards. Attaching extends whichever
+edge is needed. New evidence **updates** the existing finding and bumps its version, which
+is what makes out-of-order arrival and real-time updates fall out naturally instead of
+being bolted on.
+
+`closed_at` is correlation-owned, set when the window lapses, and is a **lifecycle marker,
+never a visibility filter** — closed findings are still enriched and still shown.
+`resolved_at` is operator-owned. At most one finding is open per restaurant, enforced by
+`UNIQUE (restaurant_id) WHERE closed_at IS NULL`.
+
+`findings` deliberately has **no `issue_class` column**: a finding spans multiple issue
+classes, and that is the point.
+
+*Revised during slice 1's schema design, before correlation was built. This originally
+specified a static key — `order_id` when present, otherwise restaurant + issue class +
+time bucket — which splits the brief's own reference scenario: a mixed-type incident
+spanning 2h15m becomes two or three findings under it, by issue class or across a bucket
+boundary. See `docs/decisions.md`, 2026-08-14, "Rolling 3-hour open-finding window for
+correlation", refined the same day by "Bidirectional correlation window" after the first
+form was written with its lower bound missing.*
 
 ### 6. Untrusted input stays untrusted.
 
 Customer-authored text (complaints, reviews) is fenced in prompts as data, never as
 instruction. Model output is validated against a Zod schema on the way back, and
-recommended actions are constrained to a known allowlist of action types. Any claim in
-a summary must map to an event already in the evidence set — unsupported conclusions
-are dropped or regenerated.
+recommended actions are constrained to a known allowlist of action types.
+
+Any claim in a summary must map to an event already in the evidence set. Evidence reaches
+the prompt as opaque positional labels (`E1..En`), never event ids, and the model's
+`cited_labels` are validated as a subset of the labels actually issued. **A label outside
+that set fails the whole response** — one regeneration carrying the rejection reason, then
+the deterministic fallback writer. Nothing is dropped.
+
+*Revised during slice 5: this originally said unsupported conclusions are "dropped or
+regenerated". Dropping is the design that was rejected — removing the bad citation leaves
+the sentence it supported standing with nothing underneath, which is exactly the
+unsupported conclusion this rule exists to prevent. See `docs/decisions.md`, 2026-08-14,
+"Opaque evidence labels, and one regeneration before falling back".*
 
 ---
 
@@ -104,7 +146,8 @@ are dropped or regenerated.
 - **Tailwind + shadcn/ui** for styling. shadcn is copy-paste: the component code
   lands in `src/components/ui/` and we own and edit it, so it is a starting point
   rather than a dependency to work around. Do not hand-roll anything it provides —
-  Accordion, Popover, Sheet, Table, Badge, Button, Input, Card, Separator, Skeleton.
+  Accordion, Badge, Button, Card, Input, Popover, Separator, Sheet, Skeleton, Table,
+  Textarea, Tooltip.
   It does pull real Radix packages for behaviour; that is the trade and it is worth
   it for focus management and collision positioning.
   The design system is `docs/design-principles.md`, and tokens live in one place
@@ -117,16 +160,25 @@ are dropped or regenerated.
 ```
 src/
   app/                  dashboard UI + API routes
+  components/ui/        vendored shadcn primitives — we own and edit these
   lib/
     db/                 schema, client, migrations
     events/             zod schemas, normalization
     correlation/        grouping rules — deterministic, heavily tested
     llm/                provider interface + anthropic impl + fallback impl
-    queue/              outbox, job claim/ack, retry, DLQ
+    queue/              job claim/ack, retry, DLQ (event_jobs is the outbox)
+    findings/           board/detail reads + the pure card-state functions
+    realtime/           SSE broadcaster, one poller, connection state
+    actions/            operator actions + the eval snapshot they capture
+    format/             display layer — no React, the worker imports it
+    settings/           runtime provider lookup (app_settings)
+    simulator/          preset event payloads, shared with the tests
   worker/               separate process entry point
 tests/
+scripts/                check-contrast, copy-migrations
 docs/
   decisions.md          ADR-lite log
+  design-principles.md  the design system
 ```
 
 `correlation/` and `llm/` are separate folders on purpose — the deterministic/model
@@ -264,23 +316,23 @@ the shortcuts.
 
 Keep these in view; they are explicitly required:
 
-- [ ] Web dashboard with findings, priority, status, summary, actions, evidence, timestamps
-- [ ] Event simulator in UI: delay, complaint, **duplicate**, event related to existing finding
-- [ ] Ingestion endpoint returning before AI processing
-- [ ] Durable store, queue, background worker
-- [ ] Meaningful LLM integration with structured output
-- [ ] Real-time updates without page refresh; visible `accepted → processing → ready | failed`
-- [ ] Evidence attached to every finding
-- [ ] Idempotent duplicate handling
-- [ ] Retry + permanent failure behavior
-- [ ] One persisted operator action
-- [ ] At least two failure tests
-- [ ] Architecture doc with Mermaid diagram
+- [x] Web dashboard with findings, priority, status, summary, actions, evidence, timestamps
+- [x] Event simulator in UI: delay, complaint, **duplicate**, event related to existing finding
+- [x] Ingestion endpoint returning before AI processing
+- [x] Durable store, queue, background worker
+- [x] Meaningful LLM integration with structured output
+- [x] Real-time updates without page refresh; visible `accepted → processing → ready | failed`
+- [x] Evidence attached to every finding
+- [x] Idempotent duplicate handling
+- [x] Retry + permanent failure behavior
+- [x] One persisted operator action
+- [x] At least two failure tests
+- [x] Architecture doc with Mermaid diagram
 - [ ] Product judgment section (11 questions from the brief)
 - [ ] "What I would do with one more day"
 - [ ] "What I would change before production"
-- [ ] Disclosure of AI coding tool usage
-- [ ] Working Docker container, no manual configuration
+- [x] Disclosure of AI coding tool usage
+- [x] Working Docker container, no manual configuration
 - [ ] No `_TODO_` markers remain in README.md
 
 ---

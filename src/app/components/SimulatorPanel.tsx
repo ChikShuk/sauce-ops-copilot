@@ -73,10 +73,12 @@ async function postEvent(post: SimulatorPost, label: string): Promise<LogEntry> 
         ...entry,
         status: res.status,
         outcome: "duplicate",
-        // The whole point of surfacing this: say what did NOT happen. The
-        // endpoint returns the original row's id, so the collision is nameable
-        // rather than just asserted.
-        detail: `Recognized as a duplicate of ${data.event_id} — no second event row, no second job, no new finding.`,
+        // The whole point of surfacing this: say what did NOT happen. Names the
+        // original *row's* id rather than the client-supplied event_id — the
+        // latter is identical in both posts by definition, so printing it says
+        // only "you sent this twice", while the row id says which stored row the
+        // second post collided with and is the value you would go and query.
+        detail: `Recognized as a duplicate of row ${data.id} — no second event row, no second job, no new finding.`,
       };
     }
 
