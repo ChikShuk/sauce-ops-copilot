@@ -275,7 +275,7 @@ export const BOT_TIP = (
     <p>
       In production this belongs in logs and a metrics dashboard, aggregated by restaurant
       and by day — a manager triaging a late delivery has no decision that turns on this
-      summary costing $0.0054. It is surfaced per finding here so the cost of each
+      summary costing $0.0062. It is surfaced per finding here so the cost of each
       enrichment is visible rather than assumed.
     </p>
   </>

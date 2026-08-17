@@ -2,7 +2,36 @@
 
 Real-time restaurant operations copilot: ingests operational events, correlates them
 into findings, and surfaces AI-generated summaries and recommended actions on a live
-dashboard.
+dashboard. `docker compose up` runs the whole thing — app, worker and Postgres — with
+no file to create and no API key.
+
+The line the design turns on is which half decides what. Deterministic code groups the
+events, scores the priority, and assembles the evidence; the model only writes prose over
+facts that are already settled. Take the model away entirely — which is the default, and
+what you get without a key — and findings are still correlated, still prioritized, still
+evidenced, and still live on the board. Only the wording gets flatter. Almost everything
+else here, especially how failures degrade, follows from that split.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [What this does](#what-this-does)
+- [Architecture](#architecture) — [Components](#components) · [Data flow](#data-flow) · [Deterministic vs. LLM boundary](#deterministic-vs-llm-boundary)
+- [Key design decisions](#key-design-decisions)
+- [Architectural conditions](#architectural-conditions)
+  - [Duplicate delivery](#duplicate-delivery)
+  - [Out-of-order events](#out-of-order-events)
+  - [Partial failure](#partial-failure)
+  - [Traffic spike](#traffic-spike-100000-events-in-10-minutes)
+  - [Concurrent processing](#concurrent-processing)
+  - [Redis and temporary state](#redis-and-temporary-state)
+- [Operator feedback loop](#operator-feedback-loop)
+- [Failure tests](#failure-tests)
+- [Known limitations](#known-limitations)
+- [Product and entrepreneurial judgment](#product-and-entrepreneurial-judgment)
+- [What I would do with one more day](#what-i-would-do-with-one-more-day)
+- [What I would change before production](#what-i-would-change-before-production)
+- [AI tool usage disclosure](#ai-tool-usage-disclosure)
 
 ---
 
@@ -35,6 +64,12 @@ itself is never copied into the image (`.dockerignore` keeps it out, so no key i
 baked into a layer). Worth knowing in both directions: on a machine that already has a
 `.env`, the containers inherit that provider rather than defaulting to `fallback`.
 
+**Switching between them without a restart:** the sidebar's **Model** control writes the
+choice to Postgres, which both the web app and the worker read at the point of use, and
+**Re-write summary** on an open finding regenerates its prose under the current choice —
+same evidence, same priority, same drivers. Gated by `ENABLE_PROVIDER_TOGGLE` (on in
+`.env.example`); `LLM_PROVIDER` remains the default when nothing has been chosen.
+
 ### Without Docker
 
 Postgres is the only thing worth containerizing on its own; the rest runs on Node 24
@@ -51,20 +86,6 @@ npm run worker                # in a second terminal — nothing processes witho
 ```
 
 `npm run build && npm start` for the production build instead of `npm run dev`.
-
-One thing this path found, worth stating because of who it would have hit: **`npm ci`
-refused the committed `package-lock.json`** — `esbuild`, which `tsx` depends on, was
-missing from it entirely. Every existing `node_modules` in this project had it, so nothing
-locally ever noticed; `npm ci` installs strictly from the lockfile and will not paper over
-the gap. That is exactly the failure mode a reviewer hits on their first command and the
-author never hits at all, and it was invisible until something did a clean install from
-scratch. The lockfile is now in sync (`npm install --package-lock-only`, purely additive).
-
-**Switching between them without a restart:** the sidebar's **Model** control writes the
-choice to Postgres, which both the web app and the worker read at the point of use, and
-**Re-write summary** on an open finding regenerates its prose under the current choice —
-same evidence, same priority, same drivers. Gated by `ENABLE_PROVIDER_TOGGLE` (on in
-`.env.example`); `LLM_PROVIDER` remains the default when nothing has been chosen.
 
 ---
 
@@ -125,7 +146,7 @@ before the model is involved; an LLM outage degrades the prose and never fails t
 deterministic fallback — selected by `LLM_PROVIDER`. Every call has a timeout, a bounded
 retry, schema validation, an action allowlist, and citation checking against the evidence
 set. Any failure falls through to the fallback writer. Which fields the model owns and
-which code owns is the table above.
+which code owns is the table below.
 
 **Realtime** is one server-sent-events endpoint (`GET /api/stream`) fed by a single
 process-wide poller. The poller re-reads the board once a second and fans it out to every
@@ -223,14 +244,15 @@ Every field on a finding, and who writes it:
 | `recommended_actions` | **model**, from a fixed allowlist | Eight operator verbs; anything else is rejected |
 | `extracted_tags` | **model**, from a fixed enum | Finer-grained read of free text than `issue_class`. Drives nothing |
 | `cited_event_ids` | **model's choice, code's mapping** | The model cites opaque labels `E1..En`; code validates the set and maps it back to real ids |
-| `summary_source`, `llm_model`, `enriched_at` | code | Provenance for the four fields above |
+| `summary_source`, `llm_model`, `enriched_at` | code | Provenance for the five model-written fields above |
 | `enriched_version` | code | Which `version` the prose describes. `enriched_version < version` means the summary has fallen behind the evidence |
 
 The model never decides what is true, only how it reads. Take the model away entirely and
 a finding still has its evidence, its priority, the reason for that priority, and a
 usable summary — the prose just gets flatter. That is the property the whole split exists
-to buy, and it is what the three failure tests in `tests/integration/enrichment.test.ts`
-assert — the provider being down, the model returning nonsense, and the call timing out.
+to buy, and it is what the failure tests in `tests/integration/enrichment.test.ts`
+assert — the provider being down, the model returning nonsense, and the call timing out
+among them.
 
 One consequence worth stating plainly: `issue_class` is derived from structured fields
 only (`event_type`, plus an explicit `category`/`reason`), never from free text. A
@@ -243,9 +265,6 @@ than widening correlation's — correlation's reader cannot see customer text at
 ## Key design decisions
 <!-- OWNER: agent | source: docs/decisions.md, condensed -->
 
-_These are distilled from `docs/decisions.md`. Each should be 3–5 sentences: the
-constraint, the choice, the alternative rejected, the cost._
-
 ### Postgres as queue (no Redis)
 <!-- slice: 3 -->
 The queue is the `event_jobs` table, claimed with `SELECT ... FOR UPDATE SKIP
@@ -255,8 +274,9 @@ between selecting and marking it. The brief warns against reaching for Redis to
 satisfy a checkbox, and at this scale it would buy nothing: Postgres already
 gives atomic claim semantics, and keeping the queue in the same database as the
 business data means a job row and its event commit or fail together. Two things
-this costs, honestly: throughput ceilings well below a real broker (fine here,
-irrelevant at 100k events/sec), and polling latency instead of push delivery —
+this costs, honestly: throughput ceilings well below a real broker (fine at the
+brief's spike — 100,000 events in ten minutes is about 170 a second — and a real
+limit some way above that), and polling latency instead of push delivery —
 the loop sleeps 1s only when it finds nothing, so an idle queue costs one query
 per second and a busy one costs nothing extra. If this ever outgrew Postgres,
 `event_jobs` becomes the outbox and a relay ships rows to the real broker.
@@ -382,7 +402,7 @@ and there is a documented trigger to reach it: with `ENABLE_DEMO_FAILURE_TRIGGER
 *after* correlation commits. The finding is real, the job walks the real 1s/2s/4s/8s
 ladder into the DLQ, and the finding flips to `failed` with its evidence and priority
 intact and only its prose missing. It takes ~15s of real backoff — the honest cost of not
-faking the state. Slice 7 puts a button on it.
+faking the state. The simulator's *Force a failure* button posts one.
 
 ### Prompt injection defense
 <!-- slice: 5 -->
@@ -484,9 +504,10 @@ The choice follows from the boundary rather than from benchmarks. By the time th
 runs, code has already decided which events belong together, how severe the finding is,
 why it is severe, and what evidence backs it. What is left is two or three sentences of
 narration and a pick from an eight-item allowlist, using facts handed over as givens.
-**Narration does not need a frontier model** — and reaching for an Opus-tier model at
-roughly 5× the token cost would contradict the cost-discipline argument this README makes
-about traffic spikes.
+**Narration does not need a frontier model** — and reaching for an Opus-tier model at two
+and a half times the token cost would contradict the cost-discipline argument this README
+makes about traffic spikes. That multiple is the measured one, not an estimate: see the
+table below.
 
 Output is constrained with structured outputs (`output_config.format`) rather than a tool
 definition — this is not a function call — and the JSON Schema is generated from the same
@@ -572,7 +593,7 @@ reviewer reading this repo can see the cost argument above as a real number on a
 finding rather than as a claim in a document, and multiply it by their own event volume.
 
 It is the wrong place for it in production. A restaurant manager triaging a late delivery
-has no decision that depends on the summary having cost $0.0054, and putting a per-item
+has no decision that depends on the summary having cost $0.0062, and putting a per-item
 cost in front of them invites the question of whether the cheaper summary was the worse
 one. This is internal telemetry: it belongs on an ops or finance view, aggregated by
 restaurant and by day, next to queue depth and dead-letter counts. The stored columns and
@@ -714,17 +735,18 @@ finding yet — because it failed before correlation committed — is visible in
 strip's counts rather than silently absent.
 
 ### Traffic spike (100,000 events in 10 minutes)
-What absorbs the burst. Ingestion writes the event and its job row in a single statement and returns as soon as that commits — no LLM call, no correlation, nothing on the request path that can slow down under load. A spike therefore shows up as queue depth in event_jobs, not as API latency or dropped events. The API degrades by getting behind, not by getting slow, which is the failure mode you want.
+<!-- OWNER: design-chat -->
+What absorbs the burst. Ingestion writes the event and its job row in a single statement and returns as soon as that commits — no LLM call, no correlation, nothing on the request path that can slow down under load. A spike therefore shows up as queue depth in `event_jobs`, not as API latency or dropped events. The API degrades by getting behind, not by getting slow, which is the failure mode you want.
 
-How workers scale. The worker is a separate process from the Next.js app, so the two scale independently — a burst needs more workers, not more API capacity. Claiming uses SELECT ... FOR UPDATE SKIP LOCKED, so running N workers requires no code change and no coordination: each claim either wins a row or skips to the next. I verified this with two concurrent workers against twelve queued events — all twelve processed exactly once, split 7/5 across the workers, no job claimed twice. The loop also re-polls immediately after a successful claim and sleeps only when it finds an empty queue, so the poll interval is the cost of idling rather than a per-job tax; under load, throughput is bounded by processing time.
+How workers scale. The worker is a separate process from the Next.js app, so the two scale independently — a burst needs more workers, not more API capacity. Claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`, so running N workers requires no code change and no coordination: each claim either wins a row or skips to the next. I verified this with two concurrent workers against twelve queued events — all twelve processed exactly once, split 7/5 across the workers, no job claimed twice. The loop also re-polls immediately after a successful claim and sleeps only when it finds an empty queue, so the poll interval is the cost of idling rather than a per-job tax; under load, throughput is bounded by processing time.
 
 What isn't built. Three of the mechanisms this scenario really needs are absent, and I'd rather name them than imply the system handles more than it does.
 
-There is no backpressure. Ingestion accepts events at whatever rate they arrive and the queue grows without limit. The first thing I'd add is a queue-depth ceiling per tenant — past a threshold, return 429 with Retry-After so producers slow down instead of the backlog silently growing into hours of lag. A second, gentler option is shedding by event type: a negative_review can wait; a delivery_delay during service can't.
+There is no backpressure. Ingestion accepts events at whatever rate they arrive and the queue grows without limit. The first thing I'd add is a queue-depth ceiling per tenant — past a threshold, return `429` with `Retry-After` so producers slow down instead of the backlog silently growing into hours of lag. A second, gentler option is shedding by event type: a `negative_review` can wait; a `delivery_delay` during service can't.
 
-There is no global spend control. MAX_LLM_ATTEMPTS bounds retries per job, so a single event can't loop expensively, but nothing caps aggregate cost — 100,000 events would mean as many enrichment calls as they correlate into findings, at whatever rate the workers can issue them. Production needs a concurrency semaphore around the provider (a fixed number of in-flight calls, independent of worker count) and a per-tenant daily budget that degrades to the deterministic fallback provider rather than failing when exhausted. The fallback path already exists for outages, which means the graceful-degradation behavior for a budget cap is already built — it just isn't wired to a budget.
+There is no global spend control. `MAX_LLM_ATTEMPTS` bounds retries per job, so a single event can't loop expensively, but nothing caps aggregate cost — 100,000 events would mean as many enrichment calls as they correlate into findings, at whatever rate the workers can issue them. Production needs a concurrency semaphore around the provider (a fixed number of in-flight calls, independent of worker count) and a per-tenant daily budget that degrades to the deterministic fallback provider rather than failing when exhausted. The fallback path already exists for outages, which means the graceful-degradation behavior for a budget cap is already built — it just isn't wired to a budget.
 
-There is no tenant isolation. Claiming is FIFO by next_attempt_at across all tenants, so one restaurant chain sending 100,000 events starves every other restaurant behind it in the queue. The schema is multi-tenant (tenant-scoped idempotency keys, per-restaurant correlation) but the queue is not. The fix I'd reach for first is claiming round-robin across distinct restaurant_id values rather than strictly oldest-first — a fairness quota rather than a separate queue per tenant, which would be a lot of machinery for the same outcome.
+There is no tenant isolation. Claiming is FIFO by `next_attempt_at` across all tenants, so one restaurant chain sending 100,000 events starves every other restaurant behind it in the queue. The schema is multi-tenant (tenant-scoped idempotency keys, per-restaurant correlation) but the queue is not. The fix I'd reach for first is claiming round-robin across distinct `restaurant_id` values rather than strictly oldest-first — a fairness quota rather than a separate queue per tenant, which would be a lot of machinery for the same outcome.
 
 What the operator sees while behind. Findings are created deterministically at correlation time and enriched afterward, so a finding appears on the dashboard — correctly prioritized, with its evidence attached — before the model has written anything about it. Under lag the operator sees a real, growing list of processing findings rather than an empty screen, and the summaries fill in as the workers catch up. Processing delay is visible as a state, not as an absence.
 
@@ -771,9 +793,9 @@ either way.
 
 There is no Redis in this system, so the question has a short answer: nothing breaks if it's flushed, because nothing depends on it.
 
-That was a deliberate call rather than an omission. The brief warns against adding Redis to satisfy the assignment, and every job Redis would have done here is done by Postgres. The queue is a table claimed with SELECT ... FOR UPDATE SKIP LOCKED. Idempotency is a unique constraint. The "one open finding per restaurant" invariant is a partial unique index. Concurrency control is row locks and constraint violations. All of it lives in the same transactional boundary as the business data it protects, which is precisely the property that makes the partial-failure story work — an event and its job row are written in one statement, so "saved but never queued" isn't recoverable, it's impossible.
+That was a deliberate call rather than an omission. The brief warns against adding Redis to satisfy the assignment, and every job Redis would have done here is done by Postgres. The queue is a table claimed with `SELECT ... FOR UPDATE SKIP LOCKED`. Idempotency is a unique constraint. The "one open finding per restaurant" invariant is a partial unique index. Concurrency control is row locks and constraint violations. All of it lives in the same transactional boundary as the business data it protects, which is precisely the property that makes the partial-failure story work — an event and its job row are written in one statement, so "saved but never queued" isn't recoverable, it's impossible.
 
-The one place a cache genuinely exists is the SSE broadcaster's in-memory board snapshot, and it's worth naming because it taught me something. It's process-local, rebuilt from Postgres every second, and holds nothing that isn't derivable. Losing it costs one poll interval. But during slice 6 that cache was being served to newly-connecting clients — so a browser that disconnected and returned could see a finding as accepted that the worker had already marked failed. The bug wasn't the cache, it was trusting it at a moment when it could be stale. subscribe() now always reads fresh, and there's a test that mutates the database while nobody is subscribed.
+The one place a cache genuinely exists is the SSE broadcaster's in-memory board snapshot, and it's worth naming because it taught me something. It's process-local, rebuilt from Postgres every second, and holds nothing that isn't derivable. Losing it costs one poll interval. But during slice 6 that cache was being served to newly-connecting clients — so a browser that disconnected and returned could see a finding as accepted that the worker had already marked failed. The bug wasn't the cache, it was trusting it at a moment when it could be stale. `subscribe()` now always reads fresh, and there's a test that mutates the database while nobody is subscribed.
 
 If I were adding Redis later, it would be for things Postgres is genuinely worse at rather than for the ones it handles fine: per-tenant rate limiting and LLM spend counters, where the write volume is high and losing a few seconds of counter state on a flush is acceptable. Those are exactly the mechanisms listed as missing under traffic-spike handling — and notably, they're also the only ones where "permanently lost on flush" is a tolerable answer.
 
@@ -782,13 +804,13 @@ If I were adding Redis later, it would be for things Postgres is genuinely worse
 ## Operator feedback loop
 <!-- OWNER: design-chat -->
 
-An operator can mark a finding reviewed, mark it resolved, or flag it as unhelpful with an optional note. All three persist to an append-only operator_actions log; the first two also set current-state fields on the finding, so the audit trail and the board can't disagree.
+An operator can mark a finding reviewed, mark it resolved, or flag it as unhelpful with an optional note. All three persist to an append-only `operator_actions` log; the first two also set current-state fields on the finding, so the audit trail and the board can't disagree.
 
-The one that matters for the product over time is the negative flag, and it captures more than a thumb. A finding's summary is overwritten by the next enrichment — feedback storing only a finding id would preserve the operator's judgment and lose the thing they judged. So each flag snapshots the artifact under judgment: the exact issue and summary text, the recommended actions, the model that wrote them, whether the model ran at all, the citations, and the finding's version, priority, and status at that moment. Evidence is stored by reference rather than copied, because events is append-only and ids rehydrate the model's input exactly, while findings mutate and their output has to be preserved.
+The one that matters for the product over time is the negative flag, and it captures more than a thumb. A finding's summary is overwritten by the next enrichment — feedback storing only a finding id would preserve the operator's judgment and lose the thing they judged. So each flag snapshots the artifact under judgment: the exact issue and summary text, the recommended actions, the model that wrote them, whether the model ran at all, the citations, and the finding's version, priority, and status at that moment. Evidence is stored by reference rather than copied, because `events` is append-only and ids rehydrate the model's input exactly, while findings mutate and their output has to be preserved.
 
 That asymmetry is what turns each flag into a complete eval row: input, output, judgment, and provenance. A hundred of them are a golden set — which is precisely what this build lacks, and the first thing I'd use them for.
 
-Three things I'd do with that data. Run prompt changes against the flagged set and measure whether they'd now produce something acceptable, so a prompt edit stops being a guess. Segment flags by summary_source to separate "the model wrote something wrong" from "the fallback was inadequate here" — different problems with different fixes. And check flags against priority, because a cluster on one severity level is more likely a threshold that's miscalibrated than a model that's wrong; the thresholds are deterministic constants and adjusting them is cheaper and safer than adjusting a prompt.
+Three things I'd do with that data. Run prompt changes against the flagged set and measure whether they'd now produce something acceptable, so a prompt edit stops being a guess. Segment flags by `summary_source` to separate "the model wrote something wrong" from "the fallback was inadequate here" — different problems with different fixes. And check flags against priority, because a cluster on one severity level is more likely a threshold that's miscalibrated than a model that's wrong; the thresholds are deterministic constants and adjusting them is cheaper and safer than adjusting a prompt.
 
 ---
 
@@ -855,8 +877,8 @@ fired, a slice-6 cache that served a stale board, and a `waitForNext` test helpe
 if (messages.length > before)`) — all three sat inside passing, covered tests.
 
 So each load-bearing test was verified by putting the bug back and confirming it goes
-red. The five reverts below were run against this commit; the output is what the run
-actually printed.
+red. The first four reverts below were run at `8a9cd9c`, the fifth at `f9ee90a`; the
+output shown is what those runs actually printed.
 
 **1. Remove the staleness predicate from `claimJob`** — make any `processing` job
 claimable by the next worker that asks:
@@ -1297,6 +1319,12 @@ and it is the more useful one:
 - Tip copy advertising a 35-minute delay and a 2-star review that went stale *inside the same
   commit* that changed those values, because the new test pinned the payload and nothing
   pinned the prose describing it.
+- A committed `package-lock.json` that `npm ci` refused: `esbuild`, which `tsx` depends on,
+  was missing from it entirely. Every existing `node_modules` in this project had it, so
+  nothing locally ever noticed — `npm ci` installs strictly from the lockfile and will not
+  paper over the gap. That is exactly the failure mode a reviewer hits on their first
+  command and the author never hits at all, and it stayed invisible until something did a
+  clean install from scratch.
 
 The pattern across all of them is the same and worth stating plainly: **AI assistance is
 strong at producing something that compiles, passes its own tests, and reads well, and weak at
